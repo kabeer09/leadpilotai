@@ -1,0 +1,42 @@
+# LeadPilot Public Trial — Render blueprint (Supabase Postgres + Web + Static)
+services:
+  - type: web
+    name: leadpilot-trial-api
+    runtime: docker
+    repo: https://github.com/YOUR-USERNAME/leadpilot-public-trial.git
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false            # paste Supabase connection string (postgres://...)
+      - key: SECRET_KEY
+        generateValue: true
+      - key: APP_URL
+        value: https://leadpilot-trial-api.onrender.com
+      - key: FRONTEND_URL
+        value: https://leadpilot-trial-web.onrender.com
+      - key: EMAIL_PROVIDER
+        value: dryrun           # switch to smtp/resend + credentials to go live
+      - key: PYTHON_VERSION
+        value: 3.12.0
+
+  - type: web
+    name: leadpilot-trial-web
+    runtime: static
+    repo: https://github.com/YOUR-USERNAME/leadpilot-public-trial.git
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    plan: free
+    envVars:
+      - key: VITE_API_URL
+        value: https://leadpilot-trial-api.onrender.com
+    routes:
+      - type: rewrite
+        source: /api/*
+        destination: https://leadpilot-trial-api.onrender.com/api/*
+      - type: rewrite
+        source: /*
+        destination: /index.html

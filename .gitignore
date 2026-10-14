@@ -1,0 +1,30 @@
+# Secrets — never commit real values
+.env
+backend/.env
+frontend/.env
+frontend/.env.local
+*.pem
+*.key
+
+# Runtime / local data
+*.db
+*.log
+trial.db*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+alembic/__pycache__/
+
+# Node
+node_modules/
+dist/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
