@@ -1,0 +1,8 @@
+INFO:     Started server process [26328]
+INFO:     Waiting for application startup.
+2026-10-14 21:38:59,041 WARNING app.main: CONFIG: SECRET_KEY is the insecure default — set a long random value
+2026-10-14 21:38:59,041 WARNING app.main: CONFIG: Using local SQLite (fine for trial dev; use PostgreSQL in production)
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8002 (Press CTRL+C to quit)
+2026-10-14 21:41:37,582 INFO httpx: HTTP Request: GET https://example.com "HTTP/1.1 200 OK"
+2026-10-14 21:41:38,605 INFO app.crawler: Crawl job 2: COMPLETED pages=1 companies=0

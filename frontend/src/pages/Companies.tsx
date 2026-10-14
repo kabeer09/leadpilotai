@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { Search, Download } from 'lucide-react';
 import { listCompanies } from '../lib/api';
 
 export default function Companies() {
+  const [params] = useSearchParams();
   const [items, setItems] = useState<{ id: number; name: string; country: string | null; website: string | null; emails: string[]; phones: string[]; lifecycle: string; lead_status: string; category: string | null }[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(params.get('q') || '');
   const [country, setCountry] = useState('');
   const [lifecycle, setLifecycle] = useState('active');
   const [hasEmail, setHasEmail] = useState('');
