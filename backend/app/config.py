@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     MAX_CRAWL_PAGES: int = 30
     MAX_CAMPAIGN_RECIPIENTS: int = 100
 
+    # Browser rendering fallback (JS-heavy pages). Disable where Chromium
+    # is unavailable (tiny containers): rendering then degrades to an
+    # honest "js-shell" event instead of failing.
+    PLAYWRIGHT_ENABLED: bool = True
+    MAX_RENDER_PAGES: int = 10
+
     # Rate limits (requests per minute per IP)
     RATE_LOGIN_PER_MIN: int = 10
     RATE_SIGNUP_PER_MIN: int = 5

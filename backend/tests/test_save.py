@@ -60,6 +60,66 @@ def test_save_company_creates_contacts_and_lead():
             d2.close()
 
 
+def test_js_shell_and_listing_detection():
+    from app.crawler import _looks_like_js_shell, _is_listing_page
+    shell_html = ('<html><head></head><body><div id="root"></div>'
+                  '<script src="/static/js/main.js"></script></body></html>')
+    d = {"emails": [], "phones": [], "text_len": 20}
+    assert _looks_like_js_shell(shell_html, d) is True
+    assert _looks_like_js_shell(shell_html, {"emails": ["a@b.com"],
+                                             "phones": [], "text_len": 20}) is False
+    assert _looks_like_js_shell("<html><body>" + ("word " * 2000) + "</body></html>",
+                               {"emails": [], "phones": [], "text_len": 10000}) is False
+    links = [(f"https://dir.example/exhibitor/{i}", f"Exhibitor {i}") for i in range(12)]
+    assert _is_listing_page({"links": links}, "dir.example") is True
+    assert _is_listing_page({"links": links[:3]}, "dir.example") is False
+
+
+def test_profile_identity_keeps_directory_companies_separate():
+    from app.crawler import _save_company
+    uid, sid = _owner()
+    db = SessionLocal()
+    try:
+        base = {"site_name": "", "og_title": "", "h1": "", "title": "Exhibitor",
+                "description": "d", "emails": [], "phones": [], "whatsapp": [],
+                "links": [], "official_links": [], "text_len": 600}
+        a = _save_company(db, uid, sid, "https://dir.example/exhibitor/111", dict(base), 1)
+        b = _save_company(db, uid, sid, "https://dir.example/exhibitor/222", dict(base), 1)
+        assert a is not None and b is not None and a.id != b.id
+        # same profile URL re-saved -> same row
+        a2 = _save_company(db, uid, sid, "https://dir.example/exhibitor/111", dict(base), 1)
+        assert a2.id == a.id
+        aid, bid = a.id, b.id
+    finally:
+        db.close()
+        d2 = SessionLocal()
+        try:
+            for l in d2.query(Lead).filter(
+                    Lead.company_id.in_([aid, bid])).all():
+                d2.delete(l)
+            d2.query(Company).filter(Company.id.in_([aid, bid])).delete()
+            d2.commit()
+        finally:
+            d2.close()
+
+
+def test_template_names_and_short_digit_runs_rejected():
+    from app.crawler import _save_company, _norm_phone
+    assert _norm_phone("20260916") is None  # date/booth artifact
+    assert _norm_phone("+1-555-0100") == "+15550100"
+    uid, sid = _owner()
+    db = SessionLocal()
+    try:
+        base = {"site_name": "", "og_title": "", "h1": "",
+                "title": "{lineName} shown by {exhibitorName}",
+                "description": "d", "emails": [], "phones": [], "whatsapp": [],
+                "links": [], "official_links": [], "text_len": 600}
+        assert _save_company(db, uid, sid,
+                             "https://dir.example/exhibitor/999", dict(base), 1) is None
+    finally:
+        db.close()
+
+
 def test_save_company_without_contacts_excluded():
     uid, sid = _owner()
     html = "<html><head><title>Ghost Ltd</title></head><body>" + ("word " * 200) + "</body></html>"

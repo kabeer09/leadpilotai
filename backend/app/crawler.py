@@ -11,7 +11,6 @@ import threading
 import time
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
-from urllib.robotparser import RobotFileParser
 
 import httpx
 from bs4 import BeautifulSoup
@@ -36,6 +35,80 @@ JUNK_EMAIL_DOMAINS = ("example.com", "example.org", "test.com", ".png", ".jpg")
 _cancel_flags: dict[int, threading.Event] = {}
 _threads: dict[int, threading.Thread] = {}
 
+# Shared headless browser (lazy, one at a time — rendering is the slow path)
+_browser = None
+_browser_lock = threading.Lock()
+_playwright = None
+
+
+def _ensure_browser():
+    """Launch the shared Chromium on first use. Returns None when disabled."""
+    global _browser, _playwright
+    if not settings.PLAYWRIGHT_ENABLED:
+        return None
+    with _browser_lock:
+        if _browser is not None:
+            try:
+                if _browser.is_connected():
+                    return _browser
+            except Exception:
+                _browser = None
+        try:
+            from playwright.sync_api import sync_playwright
+            _playwright = sync_playwright().start()
+            _browser = _playwright.chromium.launch(headless=True)
+            logger.info("Chromium renderer ready")
+            return _browser
+        except Exception as e:
+            logger.warning(f"Browser rendering unavailable: {str(e)[:150]}")
+            _browser = None
+            return None
+
+
+def _render_with_browser(url: str) -> tuple[str | None, str | None]:
+    """Re-fetch a JS shell with headless Chromium. Returns (html, error)."""
+    browser = _ensure_browser()
+    if browser is None:
+        return None, "browser rendering unavailable"
+    _, err = validate_url(url)
+    if err:
+        return None, err
+    with _browser_lock:
+        try:
+            page = browser.new_page(user_agent=UA)
+            try:
+                page.goto(url, timeout=30000, wait_until="networkidle")
+            except Exception:
+                pass  # networkidle often times out on chatty pages; DOM may be ready
+            page.wait_for_timeout(2500)
+            html = page.content()
+            return html, None
+        except Exception as e:
+            return None, f"render error: {str(e)[:150]}"
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+
+def _looks_like_js_shell(html: str | None, data: dict) -> bool:
+    """A page that needs rendering: almost no text/contacts but app markers."""
+    if not html:
+        return False
+    if data["emails"] or data["phones"]:
+        return False
+    low = html.lower()
+    markers = ('id="root"', 'id="app"', "__next_data__", "ng-version",
+               "data-reactroot", "nuxt", "/_next/static/", "sitecore",
+               "jss", "webpack", "vite/client", "react-root", "angular",
+               "vue-app", "__nuxt", "gatsby")
+    has_marker = any(m in low for m in markers)
+    text_len = data["text_len"] or 0
+    # Tiny shells always render; larger ones only with app markers
+    # (nav/footer boilerplate can be several KB of nothing).
+    return text_len < 1500 or (has_marker and text_len < 15000)
+
 
 def _norm_email(raw: str) -> str | None:
     e = raw.strip().lower()
@@ -51,6 +124,10 @@ def _norm_phone(raw: str) -> str | None:
     digits = re.sub(r"\D", "", raw)
     if len(digits) < 7 or len(digits) > 16:
         return None
+    # 8-digit YYYYMMDD runs are dates/booth codes, not phones (e.g. 20260916)
+    if (len(digits) == 8 and digits[:2] in ("19", "20")
+            and "01" <= digits[4:6] <= "12" and "01" <= digits[6:8] <= "31"):
+        return None
     return ("+" + digits) if raw.strip().startswith("+") else digits
 
 
@@ -65,14 +142,55 @@ def _page_type(url: str) -> str:
     return "home"
 
 
-def _robots_allowed(base: str, url: str) -> bool:
+_robots_cache: dict[str, list[tuple[str, str]]] = {}
+
+
+def _robots_rules(base: str) -> list[tuple[str, str]] | None:
+    """Fetch + parse robots.txt ourselves (None = unreachable, fail-open).
+
+    Returns [(agent, path), ...] for Disallow lines only. We honor explicit
+    Disallows and ignore everything else — never default-deny on parse quirks.
+    """
+    if base in _robots_cache:
+        return _robots_cache[base]
     try:
-        rp = RobotFileParser()
-        rp.set_url(urljoin(base, "/robots.txt"))
-        rp.read()
-        return rp.can_fetch(UA, url)
+        import httpx as _hx
+        resp = _hx.get(urljoin(base, "/robots.txt"),
+                       headers={"User-Agent": UA}, timeout=TIMEOUT)
+        if resp.status_code != 200 or len(resp.content) > 100_000:
+            _robots_cache[base] = []
+            return []
+        rules: list[tuple[str, str]] = []
+        agents: list[str] = []
+        for raw in resp.text.splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if not line or ":" not in line:
+                continue
+            key, _, val = line.partition(":")
+            key, val = key.strip().lower(), val.strip()
+            if key == "user-agent":
+                agents = [val.lower()]
+            elif key == "disallow" and val:
+                rules.extend((a, val) for a in agents)
+        _robots_cache[base] = rules
+        return rules
     except Exception:
-        return True  # fail-open on robots fetch errors (page still rate-limited)
+        return None
+
+
+def _robots_allowed(base: str, url: str) -> bool:
+    rules = _robots_rules(base)
+    if not rules:
+        return True  # unreachable/unparseable/empty: allow (still rate-limited)
+    path = urlparse(url).path or "/"
+    ua = UA.lower()
+    for agent, dis in rules:
+        if agent in ("*", "leadpilottrialbot") or ua.startswith(agent):
+            if dis == "/":
+                return False
+            if path.startswith(dis):
+                return False
+    return True
 
 
 def _fetch(client: httpx.Client, url: str) -> tuple[str | None, str | None]:
@@ -115,6 +233,14 @@ def extract_page(url: str, html: str) -> dict:
     og = soup.find("meta", property="og:site_name")
     if og and og.get("content"):
         og_site = og["content"].strip()[:500]
+    og_title = ""
+    ogt = soup.find("meta", property="og:title")
+    if ogt and ogt.get("content"):
+        og_title = ogt["content"].strip()[:500]
+    h1 = ""
+    h1tag = soup.find("h1")
+    if h1tag:
+        h1 = h1tag.get_text(" ", strip=True)[:500]
     desc = ""
     md = soup.find("meta", attrs={"name": "description"})
     if md and md.get("content"):
@@ -133,17 +259,73 @@ def extract_page(url: str, html: str) -> dict:
             wa_confirmed.append(norm)
 
     links = []
+    external: list[tuple[str, str, str]] = []  # (host, url, anchor)
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         if href.startswith(("mailto:", "tel:", "javascript:", "#")):
             continue
-        links.append((urljoin(url, href), (a.get_text(strip=True) or "")[:120]))
+        full = urljoin(url, href)
+        anchor = (a.get_text(strip=True) or "")[:120]
+        links.append((full, anchor))
+        h = (urlparse(full).hostname or "").lower()
+        if h and h != (urlparse(url).hostname or "").lower():
+            external.append((h, full, anchor))
+    social = ("facebook.", "linkedin.", "twitter.", "instagram.", "youtube.",
+              "pinterest.", "tiktok.", "whatsapp.", "telegram.")
+    official = [e for e in external
+                if not any(s in e[0] for s in social)
+                and not any(s in e[1].lower() for s in ("google.", "apple.com", "microsoft."))]
     return {
-        "title": title, "site_name": og_site, "description": desc,
+        "title": title, "site_name": og_site, "og_title": og_title, "h1": h1,
+        "description": desc,
         "emails": emails[:20], "phones": phones[:20],
         "whatsapp": sorted(set(wa_confirmed))[:10],
-        "links": links, "text_len": len(text),
+        "links": links, "official_links": official[:10],
+        "text_len": len(text),
     }
+
+
+PROFILE_PATH_RE = re.compile(
+    r"/(exhibitor|exhibitors|company|companies|profile|profiles|listing|listings|"
+    r"vendor|vendors|supplier|suppliers|member|members|brand|brands)/[^/?#]+",
+    re.IGNORECASE)
+
+# Pages that are never companies and never worth following
+SKIP_PATH_RE = re.compile(
+    r"/(login|log-in|signin|sign-in|signup|sign-up|register|account|auth|"
+    r"identity|password|checkout|cart|search\?|admin|wp-admin|api/)",
+    re.IGNORECASE)
+
+BOTCHECK_RE = re.compile(
+    r"(sign you in|access denied|forbidden|are you a robot|captcha|"
+    r"just a moment|attention required|403 forbidden|verify you are human)",
+    re.IGNORECASE)
+
+
+def _profile_links(data: dict, host: str) -> list[str]:
+    """Same-host links that look like entity profile/detail pages."""
+    out = []
+    for href, _anchor in data["links"]:
+        if (urlparse(href).hostname or "") != host:
+            continue
+        path = urlparse(href).path or ""
+        if SKIP_PATH_RE.search(path):
+            continue
+        m = PROFILE_PATH_RE.search(path)
+        if not m:
+            continue
+        # The slug must look like an entity id/slug, not a section index:
+        # require a digit or a long slug (excludes /exhibitor/exhibitor-directory).
+        slug = m.group(0).rstrip("/").split("/")[-1]
+        if not (re.search(r"\d", slug) or len(slug) > 12):
+            continue
+        out.append(href.split("#")[0])
+    return sorted(set(out))
+
+
+def _is_listing_page(data: dict, host: str) -> bool:
+    """A directory/listing page: many profile links, not a company itself."""
+    return len(_profile_links(data, host)) >= 10
 
 
 def _is_company_candidate(data: dict) -> bool:
@@ -153,17 +335,38 @@ def _is_company_candidate(data: dict) -> bool:
 
 def _save_company(db, user_id: int, source_id: int, url: str, data: dict,
                  depth: int) -> Company | None:
-    name = data["site_name"] or data["title"].split("|")[0].split("-")[0].strip()[:500]
-    if not name:
+    def _clean(s: str) -> str:
+        cleaned = s.split("|")[0].split(" - ")[0].split(" – ")[0].strip()[:500]
+        # Reject symbol-only junk some templates put in meta tags (e.g. og:title="*")
+        if cleaned and not re.search(r"[A-Za-z0-9]", cleaned):
+            return ""
+        return cleaned
+
+    h1 = data.get("h1") or ""
+    name = (data.get("site_name")
+            or (_clean(h1) if len(h1) <= 80 else "")
+            or _clean(data.get("title") or "")
+            or _clean(data.get("og_title") or ""))
+    # Unrendered front-end template placeholders are not company names
+    # (e.g. "{lineName} shown by {exhibitorName}").
+    if not name or "{" in name or "}" in name or "%s" in name:
         return None
     host = urlparse(url).hostname or ""
+    path = urlparse(url).path or "/"
+    # Identity: exact profile URL first; homepage URLs additionally match by
+    # domain (so re-crawls of a homepage update one row — profiles on a
+    # shared directory domain never collapse into each other).
     existing = db.query(Company).filter(
-        Company.user_id == user_id, Company.website == host).first()
+        Company.user_id == user_id, Company.profile_url == url).first()
+    if not existing and path in ("", "/"):
+        existing = db.query(Company).filter(
+            Company.user_id == user_id, Company.website == host).first()
     company = existing or Company(user_id=user_id, source_id=source_id, name=name[:500])
     if not existing:
         db.add(company)
         db.flush()
-    company.website = host
+    if not company.website:
+        company.website = host
     if data["description"] and not company.product_summary:
         company.product_summary = data["description"]
     company.profile_url = company.profile_url or url
@@ -217,6 +420,82 @@ def _save_company(db, user_id: int, source_id: int, url: str, data: dict,
     return company
 
 
+SITE_ANCHOR_RE = re.compile(r"visit|website|official|web site|homepage", re.IGNORECASE)
+
+
+def _pick_official_site(official_links: list[tuple[str, str, str]]) -> tuple[str, str] | None:
+    """Choose the exhibitor's own site from outbound links.
+
+    Prefers links whose anchor names the destination (e.g. 'Visit
+    aspenhome.net') or says website/visit — never blindly takes the first
+    outbound link (often registration/sister-site links).
+    """
+    if not official_links:
+        return None
+    for host, url, anchor in official_links:
+        bare = host[4:] if host.startswith("www.") else host
+        if bare and bare.lower() in (anchor or "").lower():
+            return host, url
+    for host, url, anchor in official_links:
+        if SITE_ANCHOR_RE.search(anchor or ""):
+            return host, url
+    return official_links[0][0], official_links[0][1]
+
+
+def _enrich_from_official_site(db, user_id: int, company: Company,
+                               site_url: str, client: httpx.Client,
+                               render_budget: list[int]) -> int:
+    """One polite visit to the exhibitor's own website; merges contacts.
+
+    Returns number of new contact values stored. Never overwrites: official
+    site becomes company.website, profile URL stays as provenance.
+    """
+    host = urlparse(site_url).hostname or ""
+    base = f"{urlparse(site_url).scheme}://{host}"
+    if not _robots_allowed(base, site_url):
+        return 0
+    html, err = _fetch(client, site_url)
+    data = extract_page(site_url, html) if html and not err else None
+    thin = data is not None and not data["emails"] and not data["phones"]
+    if data is None or (thin and _looks_like_js_shell(html, data)):
+        if render_budget[0] > 0:
+            html2, err2 = _render_with_browser(site_url)
+            if html2 and not err2:
+                render_budget[0] -= 1
+                data = extract_page(site_url, html2)
+    if not data or (not data["emails"] and not data["phones"]):
+        return 0
+    have = {(c.kind, c.normalized) for c in
+            db.query(Contact).filter(Contact.company_id == company.id).all()}
+    added = 0
+    for e in data["emails"]:
+        if ("EMAIL", e) not in have:
+            db.add(Contact(user_id=user_id, company_id=company.id, kind="EMAIL",
+                           value=e, normalized=e, source_url=site_url,
+                           source_page=_page_type(site_url)))
+            added += 1
+    for p in data["phones"]:
+        if ("PHONE", p) not in have:
+            db.add(Contact(user_id=user_id, company_id=company.id, kind="PHONE",
+                           value=p, normalized=p, source_url=site_url,
+                           source_page=_page_type(site_url)))
+            added += 1
+    for w in data["whatsapp"]:
+        if ("WHATSAPP", w) not in have:
+            db.add(Contact(user_id=user_id, company_id=company.id, kind="WHATSAPP",
+                           value=w, normalized=w, source_url=site_url,
+                           source_page=_page_type(site_url),
+                           whatsapp_status="identified"))
+            added += 1
+    if added:
+        company.website = host
+        if company.lifecycle == "EXCLUDED_NO_CONTACT":
+            company.lifecycle = "active"
+        company.last_verified = datetime.utcnow()
+        db.commit()
+    return added
+
+
 def run_job(job_id: int) -> None:
     """Background crawl worker. All writes tenant-scoped."""
     db = SessionLocal()
@@ -233,6 +512,7 @@ def run_job(job_id: int) -> None:
         seen: set[str] = set()
         queue: list[tuple[str, int]] = [(job.url, 0)]
         pages = companies = contacts = 0
+        render_left = [settings.MAX_RENDER_PAGES]
         errors: list[str] = []
         base = f"{urlparse(job.url).scheme}://{base_host}"
 
@@ -258,20 +538,64 @@ def run_job(job_id: int) -> None:
                     errors.append(f"{canon}: {err}"[:200])
                 else:
                     data = extract_page(canon, html or "")
-                    detail = f"emails={len(data['emails'])} phones={len(data['phones'])}"
-                    if _is_company_candidate(data):
+                    via = "static"
+                    if (_looks_like_js_shell(html, data)
+                            and render_left[0] > 0):
+                        rendered_html, render_err = _render_with_browser(canon)
+                        if rendered_html:
+                            render_left[0] -= 1
+                            data = extract_page(canon, rendered_html)
+                            via = "rendered"
+                        elif render_err == "browser rendering unavailable":
+                            errors.append(f"{canon}: JS shell — browser rendering unavailable"[:200])
+                    host = urlparse(canon).hostname or ""
+                    if BOTCHECK_RE.search(f"{data['title']} {(data['h1'] or '')}"):
+                        detail = "bot-check/denied page — skipped save"
+                        db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
+                                          url=canon, status="blocked", detail=detail))
+                        job.pages_visited = pages
+                        db.commit()
+                        time.sleep(PAGE_DELAY)
+                        continue
+                    detail = (f"emails={len(data['emails'])} phones={len(data['phones'])} "
+                              f"via={via}")
+                    if _is_listing_page(data, host):
+                        nprof = len(_profile_links(data, host))
+                        detail += f" listing:{nprof}-profiles-queued"
+                    elif _is_company_candidate(data):
                         comp = _save_company(db, job.user_id, job.source_id,
                                              canon, data, depth)
                         if comp:
                             companies += 1
                             contacts += len(data["emails"]) + len(data["phones"])
+                            # Exhibitor profile without contacts? Try its official site.
+                            if (not data["emails"] and not data["phones"]
+                                    and data.get("official_links")):
+                                picked = _pick_official_site(data["official_links"])
+                                extra = _enrich_from_official_site(
+                                    db, job.user_id, comp, picked[1], client,
+                                    render_budget=render_left) if picked else 0
+                                if extra:
+                                    site_host = picked[0]
+                                if extra:
+                                    contacts += extra
+                                    detail += f" +enriched:{extra}-from-{site_host}"
                     db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
                                       url=canon, status="ok", detail=detail[:500]))
                     if depth < job.max_depth:
-                        for href, _label in data["links"][:60]:
-                            h = urlparse(href).hostname or ""
-                            if h == base_host and href.split("#")[0] not in seen:
-                                queue.append((href.split("#")[0], depth + 1))
+                        profiles = _profile_links(data, host)
+                        # Profile links first: entity pages before site wandering.
+                        for href in profiles:
+                            if href not in seen:
+                                queue.append((href, depth + 1))
+                        # From a listing page, follow ONLY profiles (no wandering).
+                        if not _is_listing_page(data, host):
+                            for href, _label in data["links"][:60]:
+                                h = urlparse(href).hostname or ""
+                                p = urlparse(href).path or ""
+                                if (h == base_host and not SKIP_PATH_RE.search(p)
+                                        and href.split("#")[0] not in seen):
+                                    queue.append((href.split("#")[0], depth + 1))
                 job.companies_found = companies
                 job.contacts_found = contacts
                 db.commit()
