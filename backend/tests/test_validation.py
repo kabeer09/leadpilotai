@@ -275,6 +275,57 @@ def test_andmore_details_parses_contact_card(monkeypatch):
     assert fa.fetch_exhibitor_details("https://example.com/x") is None
 
 
+def test_details_survive_render_replacement(monkeypatch):
+    """Ordering: shell-check on RAW data; details re-merged after render."""
+    import app.crawler as craw
+    shell_html = ("<html><head><title>{exhibitorName} at Fair</title></head>"
+                  "<body><div id='root'></div>"
+                  "<script src='/static/app.js'></script></body></html>")
+    real_html = ("<html><head><title>{exhibitorName} at Fair</title></head>"
+                 "<body><p>Giftware wholesale.</p></body></html>")
+    d0 = craw.extract_page("https://fair.example/exhibitor/1", shell_html)
+    assert craw._looks_like_js_shell(shell_html, d0) is True  # raw: shell
+    det = {"emails": ["a@mint.example"], "phones": ["123456789"],
+           "contact_names": [], "address": None, "booth": None,
+           "company_name": "Mint", "website": None}
+    # merge (as _process_url does)
+    for e in det["emails"]:
+        d0["emails"].append(e)
+    # shell check must have run BEFORE merge in real flow; raw check is True
+    # re-extract wipes, then re-merge restores:
+    d1 = craw.extract_page("https://fair.example/exhibitor/1", real_html)
+    assert d1["emails"] == []  # wipe confirmed (the old bug surface)
+    for e in det["emails"]:
+        if e not in d1["emails"]:
+            d1["emails"].append(e)
+    d1["details_name"] = det["company_name"]
+    assert d1["emails"] == ["a@mint.example"]
+    # name falls back to details_name when page title is a template
+    assert "{" in (d1["title"] or "")
+    from app.crawler import _save_company
+    from app.database import SessionLocal
+    from app.models import User, Source, Company, Contact, Lead
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter(User.email == "val@test.example").first()
+        s = db.query(Source).filter(Source.user_id == u.id).first()
+        comp = _save_company(db, u.id, s.id,
+                             "https://fair.example/exhibitor/1", d1, 1)
+        assert comp is not None and comp.name == "Mint"
+        cid = comp.id
+    finally:
+        db.close()
+        d2 = SessionLocal()
+        try:
+            for l in d2.query(Lead).filter(Lead.company_id == cid).all():
+                d2.delete(l)
+            d2.query(Contact).filter(Contact.company_id == cid).delete()
+            d2.query(Company).filter(Company.id == cid).delete()
+            d2.commit()
+        finally:
+            d2.close()
+
+
 def test_lvm_adapter_parses_buckets(monkeypatch):
     import app.fair_adapters as fa
     import httpx

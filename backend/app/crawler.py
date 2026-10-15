@@ -415,6 +415,7 @@ def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
     name = (data.get("site_name")
             or _clean(data.get("profile_name") or "")
             or (_clean(h1) if len(h1) <= 80 else "")
+            or _clean(data.get("details_name") or "")
             or _clean(data.get("title") or "")
             or _clean(data.get("og_title") or ""))
     # Unrendered front-end template placeholders are not company names
@@ -780,9 +781,15 @@ def _process_url(db, client, job, canon: str, depth: int,
         return
     data = extract_page(canon, html or "")
     via = "static"
+    # Shell check FIRST on raw data: merged details would mask the shell
+    # (contacts present -> "not a shell" -> no render -> template title
+    # survives -> name rejected -> silent zero-save crawls).
+    with lock:
+        can_render = shared["render_budget"][0] > 0
+    _need_render = _looks_like_js_shell(html, data) and can_render
     # ANDMORE exhibitor card: the fair's own details API carries the full
     # contact block (company + showroom-contact emails, phones, address,
-    # booth) that the page only reveals after interaction.
+    # booth, company name) that the page only reveals after interaction.
     from app.fair_adapters import fetch_exhibitor_details
     det = fetch_exhibitor_details(canon)
     det_tag = ""
@@ -796,19 +803,32 @@ def _process_url(db, client, job, canon: str, depth: int,
         for key in ("address", "booth"):
             if det.get(key) and not data.get(key):
                 data[key] = det[key]
+        if det.get("company_name"):
+            data["details_name"] = det["company_name"]
+        if det.get("company_name") and not data.get("profile_name"):
+            data["profile_name"] = det["company_name"]
         det_tag = (f" +details:{len(det.get('emails', []))}e/"
                    f"{len(det.get('phones', []))}p")
         if det.get("contact_names"):
             det_tag += f" ({', '.join(det['contact_names'][:2])})"
-    with lock:
-        can_render = shared["render_budget"][0] > 0
-    if _looks_like_js_shell(html, data) and can_render:
+    if _need_render:
         rendered_html, render_err = _render_with_browser(canon)
         if rendered_html:
             with lock:
                 shared["render_budget"][0] -= 1
             data = extract_page(canon, rendered_html)
             via = "rendered"
+            # Re-merge the details card (re-extraction wipes it) + keep the
+            # fair's company name as fallback.
+            if det:
+                for e in det.get("emails", []):
+                    if e not in data["emails"]:
+                        data["emails"].append(e)
+                for p in det.get("phones", []):
+                    if p not in data["phones"]:
+                        data["phones"].append(p)
+                if det.get("company_name"):
+                    data["details_name"] = det["company_name"]
         elif render_err == "browser rendering unavailable":
             with lock:
                 shared["errors"].append(

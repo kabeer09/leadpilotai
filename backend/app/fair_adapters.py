@@ -303,11 +303,14 @@ def fetch_exhibitor_details(page_url: str) -> dict | None:
             except Exception:
                 booth = ""
             time.sleep(0.4)
-            if not emails and not phones and not address and not booth:
+            company_name = (comp.get("companyName") or "").strip() or None
+            if not emails and not phones and not address and not booth \
+                    and not company_name:
                 return None
             return {"emails": emails, "phones": phones,
                     "contact_names": names,
                     "address": address or None, "booth": booth or None,
+                    "company_name": company_name,
                     "website": None}
     except Exception as e:
         logger.warning(f"OpenDetails {eid} failed: {str(e)[:100]}")
