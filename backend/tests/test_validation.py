@@ -117,6 +117,122 @@ def test_fetch_retries_transport_errors():
     assert err is None and html is not None and len(calls) == 2
 
 
+def test_ambiente_parse_record_maps_all_fields():
+    from app.fair_adapters import parse_ambiente_record
+    seed = ("https://ambiente.messefrankfurt.com/frankfurt/en/"
+            "exhibitor-search.html?page=1&pagesize=30")
+    rec = parse_ambiente_record({
+        "name": "Lampen <b>AG</b>", "rewriteId": "lampen-ag-1",
+        "homepage": "lampen.example",
+        "address": {"country": {"label": "Germany"}, "city": "Frankfurt",
+                    "street": "Main 1", "zip": "60311",
+                    "email": "INFO@Lampen.Example", "tel": "+49 69 123"},
+        "exhibition": {"name": "Ambiente",
+                       "exhibitionHall": [{"name": "Hall 3",
+                                           "stand": [{"name": "3.0 A51"}]}]},
+        "description": {"text": "Designer lamps."},
+        "products": {"products": [{"name": "Pendant Luna"}]},
+        "categories": [{"name": "Lighting"}],
+    }, "http://x", seed)
+    assert rec is not None
+    assert rec["profile_name"] == "Lampen AG"  # HTML stripped
+    assert rec["official_website"] == "https://lampen.example"
+    assert rec["country"] == "Germany" and rec["city"] == "Frankfurt"
+    assert rec["hall"] == "Hall 3" and rec["booth"] == "3.0 A51"
+    assert rec["emails"] == ["info@lampen.example"]
+    assert rec["phones"] == ["+49 69 123"]
+    assert rec["products"] == [{"name": "Pendant Luna", "category": ""}]
+    assert rec["industry"] == "Lighting"
+    assert rec["profile_url"].startswith(
+        "https://ambiente.messefrankfurt.com/frankfurt/en/exhibitor-search.html#")
+    assert parse_ambiente_record({"name": "   "}, "http://x", seed) is None
+    assert parse_ambiente_record({"name": "<b></b>"}, "http://x", seed) is None
+
+
+def test_ingest_adapter_records_saves_and_enriches(monkeypatch):
+    """Ingest path: records become companies; contact-less rows with a site enrich."""
+    import app.crawler as craw
+    from app.database import SessionLocal
+    from app.models import User, Source, Company, Contact, Lead
+    db = SessionLocal()
+    u = db.query(User).filter(User.email == "val@test.example").first()
+    if not u:
+        from app.security import hash_password
+        u = User(email="val@test.example", password_hash=hash_password("TestPass123"))
+        db.add(u)
+        db.commit()
+        db.refresh(u)
+    src = db.query(Source).filter(Source.user_id == u.id).first()
+    if not src:
+        src = Source(user_id=u.id, url="https://val.example", name="v",
+                     status="COMPLETED")
+        db.add(src)
+        db.commit()
+        db.refresh(src)
+    uid, sid, job_url = u.id, src.id, "https://fake-fair.example/search"
+    from app.models import CrawlJob
+    job = CrawlJob(user_id=uid, source_id=sid, url=job_url,
+                   max_pages=10, max_depth=1, status="CRAWLING")
+    db.add(job)
+    db.commit()
+    jid = job.id
+    db.close()
+
+    recs = [{
+        "title": "Ingest Co", "h1": "Ingest Co", "profile_name": "Ingest Co",
+        "description": "Metal decor wholesale.", "industry": "Furniture",
+        "country": "India", "city": "Moradabad", "address": "A 1, Moradabad",
+        "hall": "H1", "booth": "B2", "products": [{"name": "Urli", "category": ""}],
+        "official_website": "https://ingest.example",
+        "profile_url": job_url + "#exhibitor=ingest-co",
+        "emails": [], "phones": [], "whatsapp": [], "official_links": [],
+        "links": [], "text_len": 5000,
+    }]
+
+    def fake_enrich(db_, uid_, comp, site, client, render_budget, job_id=None):
+        assert site == "https://ingest.example"
+        db_.add(Contact(user_id=uid_, company_id=comp.id, kind="EMAIL",
+                        value="hello@ingest.example",
+                        normalized="hello@ingest.example",
+                        source_url=site, source_page="contact"))
+        return 1, 2
+
+    monkeypatch.setattr(craw, "_enrich_from_official_site", fake_enrich)
+    db = SessionLocal()
+    try:
+        job = db.query(CrawlJob).filter(CrawlJob.id == jid).first()
+        shared = {"lock": __import__("threading").Lock(), "queue": None,
+                  "seen": set(), "pages": 0, "companies": 0, "contacts": 0,
+                  "render_budget": [10], "errors": [], "cancel": None,
+                  "directory_mode": True}
+        import threading
+        shared["cancel"] = threading.Event()
+        from queue import Queue
+        shared["queue"] = Queue()
+        n = craw._ingest_adapter_records(db, job, recs, shared)
+        assert n == 1
+        c = db.query(Company).filter(Company.user_id == uid,
+                                    Company.name == "Ingest Co").first()
+        assert c is not None and c.hall == "H1" and c.booth == "B2"
+        assert c.country == "India" and c.category == "Furniture"
+        rows = db.query(Contact).filter(Contact.company_id == c.id).all()
+        assert {r.value for r in rows} == {"hello@ingest.example"}
+        assert shared["pages"] >= 2  # enrichment visits counted
+        cid = c.id
+    finally:
+        db.close()
+        d2 = SessionLocal()
+        try:
+            for l in d2.query(Lead).filter(Lead.company_id == cid).all():
+                d2.delete(l)
+            d2.query(Contact).filter(Contact.company_id == cid).delete()
+            d2.query(Company).filter(Company.id == cid).delete()
+            d2.query(CrawlJob).filter(CrawlJob.id == jid).delete()
+            d2.commit()
+        finally:
+            d2.close()
+
+
 def test_lvm_adapter_parses_buckets(monkeypatch):
     import app.fair_adapters as fa
     import httpx

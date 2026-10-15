@@ -918,6 +918,74 @@ def _worker(job_id: int, user_id: int, source_id: int | None,
         db.close()
 
 
+def _ingest_adapter_records(db, job, records: list[dict],
+                            shared: dict) -> int:
+    """Stage 1+2 for full-record adapters: save every record, enrich the
+    contact-less ones that have an official website (Stage 3 inline).
+
+    Bounded: enrichment visits count toward the job page budget. Existing
+    rows update in place (never duplicated); complete rows are untouched.
+    Returns companies saved-or-updated.
+    """
+    import json as _json
+    import httpx as _hx
+    lock = shared["lock"]
+    saved = 0
+    enriched = 0
+    with _hx.Client() as client:
+        for rec in records[:1500]:
+            if shared["cancel"].is_set():
+                break
+            data = {
+                "site_name": "", "og_title": "", "h1": "",
+                "title": rec.get("title") or "",
+                "profile_name": rec.get("profile_name") or rec.get("title"),
+                "description": rec.get("description") or "",
+                "profile_description": rec.get("description") or "",
+                "industry": rec.get("industry") or "",
+                "country": rec.get("country"),
+                "city": rec.get("city"),
+                "address": rec.get("address"),
+                "hall": rec.get("hall"), "booth": rec.get("booth"),
+                "products": rec.get("products") or [],
+                "products_json": _json.dumps(
+                    [{"name": p.get("name", "")[:200], "category": ""}
+                     for p in (rec.get("products") or [])[:20]])
+                if rec.get("products") else None,
+                "emails": rec.get("emails") or [],
+                "phones": rec.get("phones") or [],
+                "whatsapp": rec.get("whatsapp") or [],
+                "official_links": [],
+                "links": [], "text_len": 5000,
+            }
+            url = rec.get("profile_url") or job.url
+            with lock:
+                comp = _save_company(db, job.user_id, job.source_id,
+                                     url, data, 1, lock=None)
+            if not comp:
+                continue
+            saved += 1
+            with lock:
+                shared["companies"] += 1
+                shared["contacts"] += len(data["emails"]) + len(data["phones"])
+            site = rec.get("official_website")
+            if site and not data["emails"] and not data["phones"] \
+                    and shared["pages"] < job.max_pages:
+                extra, e_pages = _enrich_from_official_site(
+                    db, job.user_id, comp, site, client,
+                    render_budget=shared["render_budget"], job_id=job.id)
+                with lock:
+                    shared["pages"] += e_pages + 1
+                    shared["contacts"] += extra
+                    enriched += 1 if extra else 0
+    job.companies_found = shared["companies"]
+    job.contacts_found = shared["contacts"]
+    job.pages_visited = shared["pages"]
+    db.commit()
+    logger.info(f"Adapter ingest job {job.id}: {saved} companies ({enriched} enriched)")
+    return saved
+
+
 def run_job(job_id: int) -> None:
     """Background crawl: adapter discovery (S1) + worker pool (S2/S3)."""
     from queue import Queue, Empty
@@ -947,9 +1015,22 @@ def run_job(job_id: int) -> None:
             # profile-URL pages become companies from then on.
             "directory_mode": False,
         }
-        # Stage 1: adapter enumeration (whole directory in seconds) or seed URL
-        from app.fair_adapters import discover_profiles
-        profiles, adapter_err = discover_profiles(seed_url)
+        # Stage 1: full-record adapters (Ambiente: name/address/hall/
+        # products/email/phone per record), URL-list adapters (LVM), else seed.
+        from app.fair_adapters import discover_profiles, discover_records
+        records, records_err = discover_records(seed_url)
+        if records:
+            with shared["lock"]:
+                shared["directory_mode"] = True
+            n_ingested = _ingest_adapter_records(
+                db, job, records, shared)
+            db.add(CrawlEvent(
+                user_id=user_id, job_id=job_id, url=seed_url, status="ok",
+                detail=f"[S1] adapter: {len(records)} records ingested, "
+                       f"{n_ingested} companies saved"))
+            db.commit()
+        profiles, adapter_err = (discover_profiles(seed_url)
+                                 if not records else (None, None))
         if profiles:
             with shared["lock"]:
                 shared["directory_mode"] = True
