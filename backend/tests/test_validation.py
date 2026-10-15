@@ -233,6 +233,48 @@ def test_ingest_adapter_records_saves_and_enriches(monkeypatch):
             d2.close()
 
 
+def test_andmore_details_parses_contact_card(monkeypatch):
+    import app.fair_adapters as fa
+    import httpx
+
+    payload = {"count": 1, "data": [{
+        "companyDetails": {
+            "companyName": "A & B Home Group",
+            "activeLeases": [{"showrooms": [
+                {"showroomBuildingName": "Building 1",
+                 "showroomFloor": "11", "showroom": "B2"}]}]},
+        "directoryContactInfo": {
+            "address1": "800 N. Haven Avenue", "city": "Ontario",
+            "zip": "91764", "companyEmail1": "customerservice@abhomeinc.com",
+            "directoryContactEmail": "lauram@abhomeinc.com",
+            "directoryContactFirstName": "Laura",
+            "directoryContactLastName": "Maguire",
+            "primaryPhoneNo": "9097585366",
+            "tollFreePhoneNo": "888-868-1808",
+            "faxNumber": "9097585377"},
+    }]}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return payload
+
+    monkeypatch.setattr(httpx.Client, "get",
+                        lambda self, url, **k: FakeResp())
+    d = fa.fetch_exhibitor_details(
+        "https://www.atlantamarket.com/exhibitor/118533")
+    assert d is not None
+    assert "customerservice@abhomeinc.com" in d["emails"]
+    assert "lauram@abhomeinc.com" in d["emails"]
+    assert "9097585366" in d["phones"] and "8888681808" in d["phones"]
+    assert "Laura Maguire" in d["contact_names"]
+    assert "Ontario" in (d["address"] or "")
+    assert "B2" in (d["booth"] or "")
+    # non-ANDMORE URLs untouched
+    assert fa.fetch_exhibitor_details("https://example.com/x") is None
+
+
 def test_lvm_adapter_parses_buckets(monkeypatch):
     import app.fair_adapters as fa
     import httpx

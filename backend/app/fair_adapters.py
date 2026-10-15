@@ -222,6 +222,99 @@ def _atlanta_profiles() -> tuple[list[str], str | None]:
     return _andmore_profiles("https://www.atlantamarket.com", "atlanta-market")
 
 
+# Exhibitor-details API per ANDMORE market: (base, channel, directory pageId).
+# Same public key + call convention as the markets' own page JavaScript.
+ANDMORE_DETAILS = {
+    "lasvegasmarket.com": ("https://www.lasvegasmarket.com", "las-vegas-market",
+                           "cfa5a5c2-9bd7-4309-b356-1acdef98a65f"),
+    "atlantamarket.com": ("https://www.atlantamarket.com", "atlanta-market",
+                          "B20C0E90-484D-4848-8EA6-BC3B2BCC391F"),
+}
+ANDMORE_KEY = "391D75C6-01EE-463C-8B51-47B2748F8ACD"
+ANDMORE_PROFILE_RE = None  # lazy compiled below
+
+
+def fetch_exhibitor_details(page_url: str) -> dict | None:
+    """Full contact card for one ANDMORE exhibitor page via OpenDetails.
+
+    Returns {emails, phones, contact_names, address, booth, website} with
+    the profile URL as provenance, or None (not ANDMORE / no match / error).
+    One fast JSON call (~1s), polite delay included.
+    """
+    import re as _re2
+    global ANDMORE_PROFILE_RE
+    if ANDMORE_PROFILE_RE is None:
+        ANDMORE_PROFILE_RE = _re2.compile(r"/exhibitor/(\d+)")
+    host = (page_url.split("//", 1)[-1].split("/", 1)[0] or "").lower()
+    cfg = next(((b, c, p) for d, (b, c, p) in ANDMORE_DETAILS.items()
+                if d in host), None)
+    if cfg is None:
+        return None
+    base, channel, page_id = cfg
+    m = ANDMORE_PROFILE_RE.search(page_url)
+    if not m:
+        return None
+    eid = m.group(1)
+    headers = {"User-Agent": UA, "Accept": "application/json",
+               "Referer": f"{base}/exhibitor/directory", "Channel": channel}
+    url = (f"{base}/imc-api/v2/exhibitors/OpenDetails?sc_apikey={ANDMORE_KEY}"
+           f"&exhibitorIds={eid}&pageId={page_id}")
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            r = client.get(url, headers=headers)
+            if r.status_code != 200:
+                return None
+            rows = (r.json().get("data") or [])
+            if not rows:
+                return None
+            row = rows[0]
+            ci = row.get("directoryContactInfo") or {}
+            comp = (row.get("companyDetails") or {})
+            emails, names = [], []
+            for key in ("companyEmail1", "companyEmail2",
+                        "directoryContactEmail"):
+                val = (ci.get(key) or "").strip().lower()
+                if val and "@" in val and val not in emails:
+                    emails.append(val)
+            first, last = (ci.get("directoryContactFirstName") or "").strip(), \
+                (ci.get("directoryContactLastName") or "").strip()
+            if first or last:
+                names.append(f"{first} {last}".strip())
+            phones = []
+            for key in ("primaryPhoneNo", "tollFreePhoneNo", "faxNumber"):
+                val = "".join(ch for ch in str(ci.get(key) or "") if ch.isdigit())
+                if len(val) >= 7 and val not in phones:
+                    phones.append(val)
+            addr_parts = [ci.get("address1") or "", ci.get("address2") or ""]
+            city = ci.get("city") or ""
+            zipc = ci.get("zip") or ""
+            address = ", ".join(p.strip() for p in
+                                addr_parts + [f"{zipc} {city}".strip()] if p.strip())
+            booth = ""
+            try:
+                leases = comp.get("activeLeases") or []
+                shows = (leases[0].get("showrooms") or []) if leases else []
+                if shows:
+                    s = shows[0]
+                    booth = " ".join(p for p in
+                                     [s.get("showroomBuildingName") or "",
+                                      s.get("showroomFloor") or "",
+                                      s.get("showroom") or ""] if p).strip()
+            except Exception:
+                booth = ""
+            time.sleep(0.4)
+            if not emails and not phones and not address and not booth:
+                return None
+            return {"emails": emails, "phones": phones,
+                    "contact_names": names,
+                    "address": address or None, "booth": booth or None,
+                    "website": None}
+    except Exception as e:
+        logger.warning(f"OpenDetails {eid} failed: {str(e)[:100]}")
+        return None
+    return None
+
+
 URL_ADAPTERS: list[tuple[str, callable]] = [
     ("lasvegasmarket.com", _lasvegas_profiles),
     ("atlantamarket.com", _atlanta_profiles),

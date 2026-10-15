@@ -780,6 +780,26 @@ def _process_url(db, client, job, canon: str, depth: int,
         return
     data = extract_page(canon, html or "")
     via = "static"
+    # ANDMORE exhibitor card: the fair's own details API carries the full
+    # contact block (company + showroom-contact emails, phones, address,
+    # booth) that the page only reveals after interaction.
+    from app.fair_adapters import fetch_exhibitor_details
+    det = fetch_exhibitor_details(canon)
+    det_tag = ""
+    if det:
+        for e in det.get("emails", []):
+            if e not in data["emails"]:
+                data["emails"].append(e)
+        for p in det.get("phones", []):
+            if p not in data["phones"]:
+                data["phones"].append(p)
+        for key in ("address", "booth"):
+            if det.get(key) and not data.get(key):
+                data[key] = det[key]
+        det_tag = (f" +details:{len(det.get('emails', []))}e/"
+                   f"{len(det.get('phones', []))}p")
+        if det.get("contact_names"):
+            det_tag += f" ({', '.join(det['contact_names'][:2])})"
     with lock:
         can_render = shared["render_budget"][0] > 0
     if _looks_like_js_shell(html, data) and can_render:
@@ -802,7 +822,7 @@ def _process_url(db, client, job, canon: str, depth: int,
         time.sleep(PAGE_DELAY)
         return
     detail = (f"emails={len(data['emails'])} phones={len(data['phones'])} "
-              f"via={via}")
+              f"via={via}{det_tag}")
     is_list = _is_listing_page(data, host)
     if is_list:
         nprof = len(_profile_links(data, host))
