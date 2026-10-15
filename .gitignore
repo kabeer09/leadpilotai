@@ -6,9 +6,10 @@ frontend/.env.local
 *.pem
 *.key
 
-# Runtime / local data
+# Runtime / local data (logs may contain callback codes)
 *.db
 *.log
+*.err
 trial.db*
 
 # Python
