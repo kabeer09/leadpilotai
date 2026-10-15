@@ -194,17 +194,30 @@ def _robots_allowed(base: str, url: str) -> bool:
 
 
 def _fetch(client: httpx.Client, url: str) -> tuple[str | None, str | None]:
-    """GET with manual redirect validation. Returns (html, error)."""
+    """GET with manual redirect validation. Returns (html, error).
+
+    One retry after 3s on transport failures (timeouts, resets) — cheap
+    sites often answer the second knock. HTTP status errors are final.
+    """
     current = url
     for _ in range(6):  # max redirect hops
         _, err = validate_url(current)
         if err:
             return None, err
-        try:
-            resp = client.get(current, headers={"User-Agent": UA}, timeout=TIMEOUT,
-                              follow_redirects=False)
-        except Exception as e:
-            return None, f"fetch error: {str(e)[:120]}"
+        resp = None
+        last_exc: Exception | None = None
+        for attempt in (1, 2):
+            try:
+                resp = client.get(current, headers={"User-Agent": UA},
+                                  timeout=TIMEOUT, follow_redirects=False)
+                last_exc = None
+                break
+            except Exception as e:
+                last_exc = e
+                if attempt == 1:
+                    time.sleep(3)
+        if resp is None:
+            return None, f"fetch error: {str(last_exc)[:120]}"
         if resp.status_code in (301, 302, 303, 307, 308):
             loc = resp.headers.get("location")
             if not loc:
@@ -509,6 +522,11 @@ def _enrich_from_official_site(db, user_id: int, company: Company,
     def _one(url: str) -> dict | None:
         nonlocal pages_used
         html, err = _fetch(client, url)
+        if err and job_id is not None:
+            db.add(CrawlEvent(
+                user_id=user_id, job_id=job_id, url=url, status="error",
+                detail=f"[S3] {err}"[:500]))
+            db.commit()
         data = extract_page(url, html) if html and not err else None
         thin = data is not None and not data["emails"] and not data["phones"]
         if (data is None or (thin and _looks_like_js_shell(html, data))) \

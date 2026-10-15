@@ -88,6 +88,35 @@ def test_validation_pass_picks_primary_and_flags_invalid():
             d2.close()
 
 
+def test_fetch_retries_transport_errors():
+    import httpx
+    from app import crawler as craw
+    calls = []
+
+    class FakeResp:
+        status_code = 200
+        headers = {"content-type": "text/html"}
+        content = b"<html><head><title>T</title></head><body>hi</body></html>"
+        text = content.decode()
+
+    def fake_get(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.ConnectTimeout("slow server")
+        return FakeResp()
+
+    client = httpx.Client()
+    orig = client.get
+    client.get = fake_get
+    try:
+        # example.com resolves for real (SSRF check passes); transport mocked
+        html, err = craw._fetch(client, "https://example.com/")
+    finally:
+        client.get = orig
+        client.close()
+    assert err is None and html is not None and len(calls) == 2
+
+
 def test_enrich_visits_contact_pages(monkeypatch):
     """Enrichment must fetch contact/about subpages, not just home."""
     from app.crawler import _enrich_from_official_site
