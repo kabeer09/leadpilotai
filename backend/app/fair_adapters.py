@@ -19,13 +19,13 @@ logger = logging.getLogger(__name__)
 UA = "LeadPilotTrialBot/0.1 (+contact via account email; respects robots.txt)"
 
 
-def _lasvegas_profiles() -> tuple[list[str], str | None]:
-    """Las Vegas Market: A-Z exhibitor buckets via the site's public API."""
+def _andmore_profiles(base: str, channel: str) -> tuple[list[str], str | None]:
+    """ANDMORE markets (Las Vegas, Atlanta, …): A-Z exhibitor buckets via
+    the platform's public API (same shared key, per-market channel)."""
     key = "391D75C6-01EE-463C-8B51-47B2748F8ACD"  # public key embedded in their own page JS
-    base = "https://www.lasvegasmarket.com"
     headers = {"User-Agent": UA, "Accept": "application/json",
                "Referer": f"{base}/exhibitor/Directory",
-               "Channel": "las-vegas-market"}
+               "Channel": channel}
     try:
         with httpx.Client(timeout=20.0) as client:
             try:
@@ -214,8 +214,17 @@ def _ambiente_records(seed_url: str) -> tuple[list[dict] | None, str | None]:
         return None, f"Ambiente adapter failed: {str(e)[:150]}"
 
 
+def _lasvegas_profiles() -> tuple[list[str], str | None]:
+    return _andmore_profiles("https://www.lasvegasmarket.com", "las-vegas-market")
+
+
+def _atlanta_profiles() -> tuple[list[str], str | None]:
+    return _andmore_profiles("https://www.atlantamarket.com", "atlanta-market")
+
+
 URL_ADAPTERS: list[tuple[str, callable]] = [
     ("lasvegasmarket.com", _lasvegas_profiles),
+    ("atlantamarket.com", _atlanta_profiles),
 ]
 
 
