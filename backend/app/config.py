@@ -8,8 +8,8 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    APP_URL: str = "http://localhost:8000"
-    FRONTEND_URL: str = "http://localhost:5173"
+    APP_URL: str = "http://127.0.0.1:8002"
+    FRONTEND_URL: str = "http://localhost:5174"
 
     EMAIL_PROVIDER: str = "dryrun"  # dryrun | smtp | resend
     SMTP_HOST: str = ""

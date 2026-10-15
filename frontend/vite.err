@@ -1,0 +1,36 @@
+[2m10:37:58 am[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/auth/google/login[39m
+Error: connect ECONNREFUSED 127.0.0.1:8002
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)
+[2m10:38:04 am[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/auth/google/login[39m
+Error: connect ECONNREFUSED 127.0.0.1:8002
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)
+[2m10:38:22 am[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/auth/google/login[39m
+Error: connect ECONNREFUSED 127.0.0.1:8002
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)
+[2m10:38:51 am[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/auth/google/login[39m
+Error: connect ECONNREFUSED 127.0.0.1:8002
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)
+[2m10:38:54 am[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/auth/google/login[39m
+Error: connect ECONNREFUSED 127.0.0.1:8002
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)
+[2m10:39:50 am[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/auth/signup[39m
+Error: connect ECONNREFUSED 127.0.0.1:8002
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)
+[2m10:39:50 am[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/auth/google/login[39m
+Error: connect ECONNREFUSED 127.0.0.1:8002
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)
+[2m10:40:05 am[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/auth/signup[39m
+Error: connect ECONNREFUSED 127.0.0.1:8002
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)
+[2m10:40:06 am[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/auth/signup[39m
+Error: connect ECONNREFUSED 127.0.0.1:8002
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)
+[2m10:40:07 am[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/auth/signup[39m
+Error: connect ECONNREFUSED 127.0.0.1:8002
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)
+[2m10:40:07 am[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/auth/signup[39m
+Error: connect ECONNREFUSED 127.0.0.1:8002
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)
+[2m10:40:08 am[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/auth/signup[39m
+Error: connect ECONNREFUSED 127.0.0.1:8002
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)
