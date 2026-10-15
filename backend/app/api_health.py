@@ -22,7 +22,7 @@ def health():
         "database": "ok" if db_ok else "unreachable",
         "email_provider": settings.EMAIL_PROVIDER,
         "provider_configured": (
-            True if settings.EMAIL_PROVIDER == "dryrun"
+            True if settings.EMAIL_PROVIDER in ("dryrun", "gmail")
             else bool((settings.SMTP_HOST and settings.SMTP_FROM)
                       or (settings.RESEND_API_KEY and settings.RESEND_FROM))),
         "warnings": startup_warnings(),
