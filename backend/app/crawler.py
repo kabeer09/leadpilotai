@@ -284,7 +284,21 @@ def extract_page(url: str, html: str) -> dict:
         if h and h != (urlparse(url).hostname or "").lower():
             external.append((h, full, anchor))
     social = ("facebook.", "linkedin.", "twitter.", "instagram.", "youtube.",
-              "pinterest.", "tiktok.", "whatsapp.", "telegram.")
+              "pinterest.", "tiktok.", "whatsapp.", "telegram.", "xing.",
+              "line.me", "t.me", "wa.me")
+    # Explicit WhatsApp contact links (wa.me/<number>) ARE business contacts
+    # per spec — but share-widget links without numbers are ignored.
+    wa_link_re = re.compile(
+        r"(?:wa\.me/|api\.whatsapp\.com/send\/?\?[^#]*?phone=)(\+?\d[\d\s().-]{6,}\d)",
+        re.IGNORECASE)
+    wa_linked = []
+    for a in soup.find_all("a", href=True):
+        m = wa_link_re.search(a["href"])
+        if m:
+            norm = _norm_phone(m.group(1))
+            if norm and norm not in wa_confirmed:
+                wa_linked.append(norm)
+    wa_confirmed.extend([w for w in wa_linked if w not in wa_confirmed])
     official = [e for e in external
                 if not any(s in e[0] for s in social)
                 and not any(s in e[1].lower() for s in ("google.", "apple.com", "microsoft."))]
@@ -367,7 +381,17 @@ def _is_company_candidate(data: dict) -> bool:
 
 
 def _save_company(db, user_id: int, source_id: int, url: str, data: dict,
-                 depth: int) -> Company | None:
+                 depth: int, lock=None) -> Company | None:
+    """Persist one company (insert or update). Pass the job lock from workers:
+    find+create becomes atomic per job so concurrent takes of the same
+    profile URL collapse into one row instead of racing duplicates."""
+    import contextlib
+    with lock or contextlib.nullcontext():
+        return _save_company_inner(db, user_id, source_id, url, data, depth)
+
+
+def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
+                        data: dict, depth: int) -> Company | None:
     def _clean(s: str) -> str:
         cleaned = s.split("|")[0].split(" - ")[0].split(" – ")[0].strip()[:500]
         # Reject symbol-only junk some templates put in meta tags (e.g. og:title="*")
@@ -479,6 +503,24 @@ def company_is_complete(db, company) -> bool:
         Contact.verification == "scraped").count() > 0
 
 
+def _save_allowed(data: dict, canon: str, is_list: bool,
+                  shared: dict) -> tuple[bool, str]:
+    """Save gate. In directory mode ONLY profile-URL pages with contacts
+    or an official site become companies (organizer section pages and
+    dead profiles are refused — they can never yield details)."""
+    if not shared.get("directory_mode"):
+        return True, ""
+    if not _looks_like_profile_url(canon) \
+            and (urlparse(canon).path or "/") not in ("", "/"):
+        return False, " skipped: not a profile page"
+    if _looks_like_profile_url(canon) \
+            and not data["emails"] and not data["phones"] \
+            and _pick_official_site(data.get("official_links"),
+                                    urlparse(canon).hostname or "") is None:
+        return False, " skipped: profile without contacts or independent site"
+    return True, ""
+
+
 def _should_drop(db, user_id: int, url: str, host: str, data: dict) -> bool:
     """Drop brand-new junk: no contacts + no official site + not a homepage.
 
@@ -518,23 +560,35 @@ def apply_contact_validation(db, company) -> str | None:
     return best
 
 
-def _pick_official_site(official_links: list[tuple[str, str, str]]) -> tuple[str, str] | None:
+def _pick_official_site(official_links: list[tuple[str, str, str]],
+                        page_host: str = "") -> tuple[str, str] | None:
     """Choose the exhibitor's own site from outbound links.
 
-    Prefers links whose anchor names the destination (e.g. 'Visit
-    aspenhome.net') or says website/visit — never blindly takes the first
-    outbound link (often registration/sister-site links).
+    The site must be an INDEPENDENT domain — sister/parent domains of the
+    fair itself (e.g. *.messefrankfurt.com on an ambiente page) are the
+    organizer talking about itself, not an exhibitor. Prefers links whose
+    anchor names the destination ('Visit aspenhome.net').
     """
-    if not official_links:
+    from app.validation import domain_of, _base_domain
+    cands = []
+    for host, url, anchor in official_links or []:
+        try:
+            same_family = _base_domain(domain_of(host)) == \
+                _base_domain(domain_of(page_host)) if page_host else False
+        except Exception:
+            same_family = False
+        if not same_family:
+            cands.append((host, url, anchor))
+    if not cands:
         return None
-    for host, url, anchor in official_links:
+    for host, url, anchor in cands:
         bare = host[4:] if host.startswith("www.") else host
         if bare and bare.lower() in (anchor or "").lower():
             return host, url
-    for host, url, anchor in official_links:
+    for host, url, anchor in cands:
         if SITE_ANCHOR_RE.search(anchor or ""):
             return host, url
-    return official_links[0][0], official_links[0][1]
+    return None
 
 
 def _enrich_from_official_site(db, user_id: int, company: Company,
@@ -650,6 +704,18 @@ def _process_url(db, client, job, canon: str, depth: int,
     # Already-complete companies are never re-crawled (costs no budget).
     # Incomplete ones flow through and get updated in place.
     host0 = urlparse(canon).hostname or ""
+    path0 = urlparse(canon).path or "/"
+    with lock:
+        dir_mode = shared.get("directory_mode")
+    # Directory mode: don't even fetch non-profile section pages (budget
+    # goes to exhibitors). Seed page (depth 0) always runs.
+    if (dir_mode and depth > 0 and not _looks_like_profile_url(canon)
+            and path0 not in ("", "/")):
+        db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
+                          url=canon, status="skipped",
+                          detail="directory mode — not a profile page"))
+        db.commit()
+        return
     existing0 = _find_company(db, job.user_id, canon, host0)
     if existing0 is not None and company_is_complete(db, existing0):
         db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
@@ -712,10 +778,15 @@ def _process_url(db, client, job, canon: str, depth: int,
     if is_list:
         nprof = len(_profile_links(data, host))
         detail += f" listing:{nprof}-profiles-queued"
+        if depth == 0:
+            with lock:
+                shared["directory_mode"] = True
     # Save when it's a company candidate AND (not a pure index,
     # or a showroom page that happens to list its lines).
+    save_ok, save_note = _save_allowed(data, canon, is_list, shared)
+    detail += save_note
     if _is_company_candidate(data) and (
-            not is_list or _looks_like_profile_url(canon)):
+            not is_list or _looks_like_profile_url(canon)) and save_ok:
         # Drop rule: a BRAND-NEW company with no contacts and no official
         # website to enrich from is junk — don't save it. Existing rows are
         # never dropped, only updated; rows WITH a site stay EXCLUDED_NO_CONTACT.
@@ -727,7 +798,7 @@ def _process_url(db, client, job, canon: str, depth: int,
             time.sleep(PAGE_DELAY)
             return
         comp = _save_company(db, job.user_id, job.source_id,
-                             canon, data, depth)
+                             canon, data, depth, lock=lock)
         if comp:
             with lock:
                 shared["companies"] += 1
@@ -735,7 +806,7 @@ def _process_url(db, client, job, canon: str, depth: int,
             # Exhibitor profile without contacts? Try its official site.
             if (not data["emails"] and not data["phones"]
                     and data.get("official_links")):
-                picked = _pick_official_site(data["official_links"])
+                picked = _pick_official_site(data["official_links"], host)
                 if picked:
                     extra, e_pages = _enrich_from_official_site(
                         db, job.user_id, comp, picked[1], client,
@@ -796,6 +867,10 @@ def _worker(job_id: int, user_id: int, source_id: int | None,
                 # EVERYTHING (enqueue already marks seen) — that bug
                 # once zeroed whole directory crawls.
                 canon = url.split("#")[0]
+                # Trailing-slash variants are the same page (/x/ == /x).
+                # Without this, directories spawn duplicate company rows.
+                if len(canon) > 8 and canon.endswith("/"):
+                    canon = canon.rstrip("/")
                 # Re-read the job row in this worker's session (fresh state)
                 job = db.query(CrawlJob).filter(CrawlJob.id == job_id).first()
                 if not job:
@@ -839,12 +914,16 @@ def run_job(job_id: int) -> None:
             "render_budget": [max_pages],  # one render max per page, total capped
             "errors": [],
             "cancel": cancel,
+            # directory_mode: seed was a fair listing (or adapter hit) — only
+            # profile-URL pages become companies from then on.
+            "directory_mode": False,
         }
         # Stage 1: adapter enumeration (whole directory in seconds) or seed URL
         from app.fair_adapters import discover_profiles
         profiles, adapter_err = discover_profiles(seed_url)
         if profiles:
             with shared["lock"]:
+                shared["directory_mode"] = True
                 for href in profiles[:max_pages * 2]:
                     if href not in shared["seen"]:
                         shared["seen"].add(href)

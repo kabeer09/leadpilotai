@@ -220,6 +220,84 @@ def test_queued_urls_are_processed_not_skipped(monkeypatch):
         db.close()
 
 
+def test_directory_mode_saves_only_viable_profiles():
+    from app.crawler import _save_allowed, _pick_official_site
+    shared = {"directory_mode": True}
+    prof = "https://fair.example/exhibitor/12345"
+    section = "https://fair.example/en/sustainability-info"
+    contactless = {"emails": [], "phones": [], "official_links": []}
+    with_site = {"emails": [], "phones": [],
+                 "official_links": [("x.example", "https://x.example", "Visit")]}
+    with_mail = {"emails": ["a@x.example"], "phones": [], "official_links": []}
+    sister = {"emails": [], "phones": [],
+              "official_links": [("www.fair.example", "https://www.fair.example",
+                                  "more information")]}
+    ok, _ = _save_allowed(contactless, prof, False, shared)
+    assert ok is False  # dead profile refused
+    ok, _ = _save_allowed(with_site, prof, False, shared)
+    assert ok is True  # enrichable
+    ok, _ = _save_allowed(with_mail, prof, False, shared)
+    assert ok is True  # contacts on profile
+    ok, _ = _save_allowed(contactless, section, False, shared)
+    assert ok is False  # organizer section page
+    ok, _ = _save_allowed(sister, prof, False, shared)
+    assert ok is False  # sister-domain links are not an official site
+    ok, _ = _save_allowed(contactless, prof, False, {})
+    assert ok is True  # generic (non-directory) crawls unaffected
+    # anchor-named independent domain wins over first-link junk
+    picked = _pick_official_site(
+        [("reg.example", "https://reg.example", "Register"),
+         ("aspen.example", "https://www.aspen.example", "Visit aspen.example")],
+        "fair.example")
+    assert picked == ("aspen.example", "https://www.aspen.example")
+
+
+def test_concurrent_same_url_saves_once():
+    """Two workers, same profile URL, same instant -> exactly one row."""
+    import threading
+    from app.crawler import _save_company
+    uid, sid = _owner()
+    base = {"site_name": "", "og_title": "", "h1": "Race Co",
+            "title": "Race Co", "description": "d", "emails": ["r@race.example"],
+            "phones": [], "whatsapp": [], "links": [], "official_links": [],
+            "text_len": 600}
+    lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    def work():
+        db = SessionLocal()
+        try:
+            barrier.wait(timeout=10)
+            _save_company(db, uid, sid, "https://dir.example/exhibitor/777",
+                          dict(base), 1, lock=lock)
+        finally:
+            db.close()
+
+    ts = [threading.Thread(target=work) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(timeout=30)
+    db = SessionLocal()
+    try:
+        rows = db.query(Company).filter(
+            Company.user_id == uid,
+            Company.profile_url == "https://dir.example/exhibitor/777").all()
+        assert len(rows) == 1
+        cid = rows[0].id
+    finally:
+        db.close()
+    d2 = SessionLocal()
+    try:
+        for l in d2.query(Lead).filter(Lead.company_id == cid).all():
+            d2.delete(l)
+        d2.query(Contact).filter(Contact.company_id == cid).delete()
+        d2.query(Company).filter(Company.id == cid).delete()
+        d2.commit()
+    finally:
+        d2.close()
+
+
 def test_save_company_without_contacts_excluded():
     uid, sid = _owner()
     html = "<html><head><title>Ghost Ltd</title></head><body>" + ("word " * 200) + "</body></html>"
