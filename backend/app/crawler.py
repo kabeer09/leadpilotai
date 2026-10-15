@@ -424,6 +424,8 @@ def _save_company(db, user_id: int, source_id: int, url: str, data: dict,
         # crawler never hides companies that already have contacts.
         if not have:
             company.lifecycle = "EXCLUDED_NO_CONTACT"
+    # Old Stage-3 rule: validate + pick the own-domain primary.
+    apply_contact_validation(db, company)
     # Ensure a lead exists
     lead = db.query(Lead).filter(Lead.user_id == user_id,
                                  Lead.company_id == company.id).first()
@@ -441,6 +443,30 @@ def _save_company(db, user_id: int, source_id: int, url: str, data: dict,
 
 
 SITE_ANCHOR_RE = re.compile(r"visit|website|official|web site|homepage", re.IGNORECASE)
+CONTACT_PAGE_RE = re.compile(r"contact|about|team|support|impressum|kontakt|reach-us|locations", re.IGNORECASE)
+
+
+def apply_contact_validation(db, company) -> str | None:
+    """Validation pass over a company's email rows (old Stage-3 rules).
+
+    Flags invalid rows, picks the own-domain match as primary. Rows are
+    never deleted. Returns the primary email or None.
+    """
+    from app.validation import (validate_contact_email, normalize_email,
+                                pick_best_email)
+    rows = db.query(Contact).filter(
+        Contact.company_id == company.id, Contact.kind == "EMAIL").all()
+    for r in rows:
+        r.normalized = normalize_email(r.value) or r.normalized
+        r.verification = ("scraped"
+                          if validate_contact_email(r.value)["valid"]
+                          else "invalid")
+    best = pick_best_email([r.value for r in rows], company.website)
+    best_norm = normalize_email(best) if best else ""
+    for r in rows:
+        r.is_primary = bool(best_norm and r.normalized == best_norm)
+    db.flush()
+    return best
 
 
 def _pick_official_site(official_links: list[tuple[str, str, str]]) -> tuple[str, str] | None:
@@ -464,56 +490,103 @@ def _pick_official_site(official_links: list[tuple[str, str, str]]) -> tuple[str
 
 def _enrich_from_official_site(db, user_id: int, company: Company,
                                site_url: str, client: httpx.Client,
-                               render_budget: list[int]) -> int:
-    """One polite visit to the exhibitor's own website; merges contacts.
+                               render_budget: list[int],
+                               job_id: int | None = None) -> tuple[int, int]:
+    """Stage 3 (old pipeline): crawl the official site's key pages.
 
-    Returns number of new contact values stored. Never overwrites: official
-    site becomes company.website, profile URL stays as provenance.
+    Visits homepage + up to 3 contact/about pages, merges EVERY public
+    email/phone with its exact source URL, then runs the validation pass.
+    Returns (new_contacts, pages_used). Never overwrites: official site
+    becomes company.website, profile URL stays as provenance.
     """
+    from app.validation import normalize_email, normalize_phone
     host = urlparse(site_url).hostname or ""
     base = f"{urlparse(site_url).scheme}://{host}"
     if not _robots_allowed(base, site_url):
-        return 0
-    html, err = _fetch(client, site_url)
-    data = extract_page(site_url, html) if html and not err else None
-    thin = data is not None and not data["emails"] and not data["phones"]
-    if data is None or (thin and _looks_like_js_shell(html, data)):
-        if render_budget[0] > 0:
-            html2, err2 = _render_with_browser(site_url)
+        return 0, 0
+    pages_used = 0
+
+    def _one(url: str) -> dict | None:
+        nonlocal pages_used
+        html, err = _fetch(client, url)
+        data = extract_page(url, html) if html and not err else None
+        thin = data is not None and not data["emails"] and not data["phones"]
+        if (data is None or (thin and _looks_like_js_shell(html, data))) \
+                and render_budget[0] > 0:
+            html2, err2 = _render_with_browser(url)
             if html2 and not err2:
                 render_budget[0] -= 1
-                data = extract_page(site_url, html2)
-    if not data or (not data["emails"] and not data["phones"]):
-        return 0
+                data = extract_page(url, html2)
+        pages_used += 1
+        if job_id is not None and data is not None:
+            db.add(CrawlEvent(
+                user_id=user_id, job_id=job_id, url=url, status="ok",
+                detail=(f"[S3] emails={len(data['emails'])} "
+                        f"phones={len(data['phones'])} "
+                        f"page={_page_type(url)}")[:500]))
+            db.commit()
+        return data
+
+    home = _one(site_url)
+    if home is None:
+        return 0, pages_used
+    found: list[tuple[str, str, list[str], list[str], list[str]]] = [(
+        site_url, _page_type(site_url),
+        home["emails"], home["phones"], home["whatsapp"])]
+    # Contact/About pages carry the emails homepages hide
+    sub = []
+    for href, _anchor in home["links"][:80]:
+        if (urlparse(href).hostname or "").lower() != host.lower():
+            continue
+        if CONTACT_PAGE_RE.search(urlparse(href).path or ""):
+            clean = href.split("#")[0]
+            if clean != site_url and clean not in sub:
+                sub.append(clean)
+        if len(sub) >= 3:
+            break
+    for curl in sub:
+        d = _one(curl)
+        if d and (d["emails"] or d["phones"] or d["whatsapp"]):
+            found.append((curl, _page_type(curl),
+                          d["emails"], d["phones"], d["whatsapp"]))
+
     have = {(c.kind, c.normalized) for c in
             db.query(Contact).filter(Contact.company_id == company.id).all()}
     added = 0
-    for e in data["emails"]:
-        if ("EMAIL", e) not in have:
-            db.add(Contact(user_id=user_id, company_id=company.id, kind="EMAIL",
-                           value=e, normalized=e, source_url=site_url,
-                           source_page=_page_type(site_url)))
-            added += 1
-    for p in data["phones"]:
-        if ("PHONE", p) not in have:
-            db.add(Contact(user_id=user_id, company_id=company.id, kind="PHONE",
-                           value=p, normalized=p, source_url=site_url,
-                           source_page=_page_type(site_url)))
-            added += 1
-    for w in data["whatsapp"]:
-        if ("WHATSAPP", w) not in have:
-            db.add(Contact(user_id=user_id, company_id=company.id, kind="WHATSAPP",
-                           value=w, normalized=w, source_url=site_url,
-                           source_page=_page_type(site_url),
-                           whatsapp_status="identified"))
-            added += 1
+    for src_url, page, emails, phones, wa in found:
+        for e in emails:
+            norm = normalize_email(e)
+            if norm and ("EMAIL", norm) not in have:
+                db.add(Contact(user_id=user_id, company_id=company.id,
+                               kind="EMAIL", value=norm, normalized=norm,
+                               source_url=src_url, source_page=page))
+                have.add(("EMAIL", norm))
+                added += 1
+        for p in phones:
+            norm = normalize_phone(p)
+            if norm and ("PHONE", norm) not in have:
+                db.add(Contact(user_id=user_id, company_id=company.id,
+                               kind="PHONE", value=norm, normalized=norm,
+                               source_url=src_url, source_page=page))
+                have.add(("PHONE", norm))
+                added += 1
+        for w in wa:
+            norm = normalize_phone(w)
+            if norm and ("WHATSAPP", norm) not in have:
+                db.add(Contact(user_id=user_id, company_id=company.id,
+                               kind="WHATSAPP", value=norm, normalized=norm,
+                               source_url=src_url, source_page=page,
+                               whatsapp_status="identified"))
+                have.add(("WHATSAPP", norm))
+                added += 1
     if added:
         company.website = host
         if company.lifecycle == "EXCLUDED_NO_CONTACT":
             company.lifecycle = "active"
         company.last_verified = datetime.utcnow()
-        db.commit()
-    return added
+    apply_contact_validation(db, company)
+    db.commit()
+    return added, pages_used
 
 
 def run_job(job_id: int) -> None:
@@ -602,16 +675,20 @@ def run_job(job_id: int) -> None:
                             if (not data["emails"] and not data["phones"]
                                     and data.get("official_links")):
                                 picked = _pick_official_site(data["official_links"])
-                                extra = _enrich_from_official_site(
+                                extra, e_pages = _enrich_from_official_site(
                                     db, job.user_id, comp, picked[1], client,
-                                    render_budget=render_left) if picked else 0
+                                    render_budget=render_left,
+                                    job_id=job.id) if picked else (0, 0)
+                                pages += e_pages
+                                job.pages_visited = pages
                                 if extra:
                                     site_host = picked[0]
-                                if extra:
                                     contacts += extra
                                     detail += f" +enriched:{extra}-from-{site_host}"
+                    stage = "[S1]" if is_list else "[S2]"
                     db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
-                                      url=canon, status="ok", detail=detail[:500]))
+                                      url=canon, status="ok",
+                                      detail=f"{stage} {detail}"[:500]))
                     if depth < job.max_depth:
                         profiles = _profile_links(data, host)
                         # Profile links first: entity pages before site wandering.
