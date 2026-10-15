@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings, startup_warnings
-from app import api_auth, api_health, api_crawls, api_crm, api_email, api_analytics, api_admin
+from app import api_auth, api_health, api_crawls, api_crm, api_email, api_analytics, api_admin, api_google
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ app.include_router(api_crm.router)
 app.include_router(api_email.router)
 app.include_router(api_analytics.router)
 app.include_router(api_admin.router)
+app.include_router(api_google.router)
 
 
 @app.on_event("startup")

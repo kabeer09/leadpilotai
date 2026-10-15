@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Rocket } from 'lucide-react';
 import { login, signup } from '../lib/api';
 import { useAuth } from '../auth';
+import { GoogleButton } from './GoogleAuth';
 
 function saveTokens(t: { access_token: string; refresh_token: string }) {
   localStorage.setItem('lp_access', t.access_token);
@@ -15,6 +16,10 @@ export function Login() {
   const [error, setError] = useState('');
   const navigate = useNavigate();
   const { refresh } = useAuth();
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get('google') === 'error') setError('Google sign-in failed. The server may not have Google configured, or access was denied.');
+  }, []);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -40,6 +45,10 @@ export function Login() {
         <label className="label mt-4">Email<input className="input mt-1" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} /></label>
         <label className="label mt-3">Password<input className="input mt-1" type="password" required value={password} onChange={(e) => setPassword(e.target.value)} /></label>
         <button className="btn-primary mt-4 w-full">Log in</button>
+        <div className="mt-3 flex items-center gap-2 text-xs text-gray-400">
+          <span className="h-px flex-1 bg-gray-200" /> or <span className="h-px flex-1 bg-gray-200" />
+        </div>
+        <div className="mt-3"><GoogleButton label="Continue with Google" /></div>
         <div className="mt-3 flex justify-between text-sm">
           <Link to="/signup" className="text-primary-600">Create account</Link>
           <Link to="/forgot" className="text-primary-600">Forgot password?</Link>
@@ -83,6 +92,10 @@ export function Signup() {
         <label className="label mt-3">Email<input className="input mt-1" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} /></label>
         <label className="label mt-3">Password (min 8 characters)<input className="input mt-1" type="password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} /></label>
         <button className="btn-primary mt-4 w-full">Sign up</button>
+        <div className="mt-3 flex items-center gap-2 text-xs text-gray-400">
+          <span className="h-px flex-1 bg-gray-200" /> or <span className="h-px flex-1 bg-gray-200" />
+        </div>
+        <div className="mt-3"><GoogleButton label="Sign up with Google" /></div>
         <p className="mt-3 text-center text-sm"><Link to="/login" className="text-primary-600">Already have an account?</Link></p>
       </form>
     </div>

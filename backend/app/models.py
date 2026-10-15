@@ -10,6 +10,9 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
+    # Google account link (Sign in with Google). Tokens stay server-side.
+    google_sub = Column(String(255), nullable=True, index=True)
+    gmail_refresh_token = Column(Text, nullable=True)
     name = Column(String(255), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     is_admin = Column(Boolean, default=False, nullable=False)
@@ -17,6 +20,17 @@ class User(Base):
     verification_token = Column(String(255), nullable=True, index=True)
     reset_token = Column(String(255), nullable=True, index=True)
     reset_expires = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class OAuthState(Base):
+    """CSRF states + one-time login codes for the Google flow (short-lived)."""
+    __tablename__ = "oauth_states"
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(20), nullable=False, index=True)  # state | login_code
+    value_hash = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 

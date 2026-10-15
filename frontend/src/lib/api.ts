@@ -44,6 +44,9 @@ export default api;
 // Auth
 export const signup = (d: object) => api.post('/auth/signup', d).then((r) => r.data);
 export const login = (d: object) => api.post('/auth/login', d).then((r) => r.data);
+export const googleLoginUrl = () => api.get('/auth/google/login').then((r) => r.data);
+export const googleConsume = (code: string) => api.post('/auth/google/consume', { code }).then((r) => r.data);
+export const gmailStatus = () => api.get('/auth/google/gmail/status').then((r) => r.data);
 export const logout = () =>
   api.post('/auth/logout', { refresh_token: localStorage.getItem('lp_refresh') }).then((r) => r.data);
 export const me = () => api.get('/auth/me').then((r) => r.data);

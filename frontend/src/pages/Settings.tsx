@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../auth';
-import api, { health, listSuppressions } from '../lib/api';
+import api, { health, listSuppressions, gmailStatus } from '../lib/api';
 
 export default function Settings() {
   const { user, refresh } = useAuth();
@@ -8,10 +8,12 @@ export default function Settings() {
   const [supp, setSupp] = useState<{ id: number; value: string; reason: string }[]>([]);
   const [verifyMsg, setVerifyMsg] = useState('');
   const [users, setUsers] = useState<{ id: number; email: string; is_active: boolean; is_admin: boolean }[]>([]);
+  const [gmail, setGmail] = useState<{ connected: boolean; provider_mode: string } | null>(null);
 
   useEffect(() => {
     health().then(setSys).catch(() => {});
     listSuppressions().then(setSupp).catch(() => {});
+    gmailStatus().then(setGmail).catch(() => {});
     refresh();
   }, []);
 
@@ -36,6 +38,12 @@ export default function Settings() {
           Current: <strong>{sys?.email_provider || '…'}</strong> — {sys?.provider_configured ? 'ready' : 'not fully configured'}.
           Provider credentials live only in the server <code>.env</code> (<code>EMAIL_PROVIDER</code> = dryrun|smtp|resend),
           never in the browser. See README → provider setup.
+        </p>
+        <p className="mt-2 text-sm">
+          Gmail: {gmail ? (gmail.connected
+            ? <span className="badge bg-green-100 text-green-800">connected — campaigns can send via your Gmail</span>
+            : <span className="badge bg-yellow-100 text-yellow-800">not connected — use “Continue with Google” on the login page</span>)
+            : 'checking…'}
         </p>
         {sys && sys.warnings.length > 0 && (
           <ul className="mt-2 space-y-1 text-xs text-yellow-700">

@@ -85,6 +85,76 @@ def get_provider():
     return DryRunProvider()
 
 
+class GmailApiProvider:
+    """Sends through the user's own Gmail (OAuth refresh token in DB).
+
+    Connected once via Sign in with Google (gmail.send scope). Tokens stay
+    server-side; 401 refresh failures report 'reconnect Google' honestly.
+    """
+    name = "gmail"
+
+    def __init__(self, refresh_token: str | None):
+        self.refresh_token = refresh_token
+
+    def _access_token(self) -> str:
+        if not self.refresh_token:
+            raise RuntimeError("Gmail not connected — sign in with Google first")
+        resp = httpx.post(
+            "https://oauth2.googleapis.com/token",
+            data={"client_id": settings.GOOGLE_CLIENT_ID,
+                  "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                  "refresh_token": self.refresh_token,
+                  "grant_type": "refresh_token"},
+            timeout=20.0)
+        if resp.status_code >= 400:
+            raise RuntimeError("Gmail access expired — sign in with Google again")
+        return resp.json()["access_token"]
+
+    def send(self, to_email: str, subject: str, body: str) -> dict:
+        import base64
+        from email.mime.text import MIMEText
+        try:
+            token = self._access_token()
+            msg = MIMEText(body, "plain", "utf-8")
+            msg["To"] = to_email
+            msg["Subject"] = subject
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+            resp = httpx.post(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"raw": raw}, timeout=20.0)
+            if resp.status_code == 429:
+                return {"ok": False, "error": "Gmail rate limited (429) — retry later",
+                        "retryable": True}
+            if resp.status_code >= 400:
+                return {"ok": False,
+                        "error": f"Gmail HTTP {resp.status_code}: {resp.text[:200]}"}
+            data = resp.json()
+            return {"ok": True, "provider_message_id": data.get("id"),
+                    "thread_id": data.get("threadId"), "accepted_only": True}
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)[:300]}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:300]}
+
+
+def get_provider_for_user(user) -> object:
+    """Per-user provider: Gmail when enabled + connected, else global mode."""
+    db_user_token = getattr(user, "gmail_refresh_token", None)
+    if settings.EMAIL_PROVIDER.lower() == "gmail" and db_user_token:
+        return GmailApiProvider(db_user_token)
+    if settings.EMAIL_PROVIDER.lower() == "gmail" and not db_user_token:
+        # Configured mode but this user never connected: fail loudly, not silently.
+        class _Unconnected:
+            name = "gmail"
+
+            def send(self, to_email: str, subject: str, body: str) -> dict:
+                return {"ok": False,
+                        "error": "Gmail not connected — sign in with Google first"}
+        return _Unconnected()
+    return get_provider()
+
+
 # ---------- helpers ----------
 def normalize_email(value: str) -> str:
     return (value or "").strip().lower()
@@ -123,7 +193,7 @@ def emails_sent_today(db, user_id: int) -> int:
 
 # ---------- campaign send (idempotent, quota-guarded) ----------
 def send_campaign(db, user, campaign: Campaign, allow_resend: bool = False) -> dict:
-    provider = get_provider()
+    provider = get_provider_for_user(user)
     if settings.EMAIL_PROVIDER != "dryrun" and not user.email_verified:
         return {"sent": 0, "failed": 0, "skipped": 0,
                 "errors": ["Verify your email address before live sending"]}
@@ -202,7 +272,9 @@ def process_due_followups(db, user_id: int, limit: int = 20) -> dict:
             Followup.status == "SCHEDULED",
             Followup.scheduled_at <= datetime.utcnow())
            .order_by(Followup.scheduled_at).limit(limit).all())
-    provider = get_provider()
+    from app.models import User as _User
+    _fu_user = db.query(_User).filter(_User.id == user_id).first()
+    provider = get_provider_for_user(_fu_user)
     sent = skipped = 0
     for fu in due:
         lead = db.query(Lead).filter(

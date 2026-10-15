@@ -17,6 +17,7 @@ import Followups from './pages/Followups';
 import Analytics from './pages/Analytics';
 import Settings from './pages/Settings';
 import Unsubscribe from './pages/Unsubscribe';
+import { GoogleCallback } from './pages/GoogleAuth';
 
 function Guard({ children }: { children: JSX.Element }) {
   const { user, loading } = useAuth();
@@ -34,6 +35,7 @@ export default function App() {
       <Route path="/forgot" element={<Forgot />} />
       <Route path="/reset" element={<Reset />} />
       <Route path="/unsubscribe" element={<Unsubscribe />} />
+      <Route path="/auth/callback" element={<GoogleCallback />} />
       <Route path="/" element={<Guard><Layout /></Guard>}>
         <Route index element={<Dashboard />} />
         <Route path="companies" element={<Companies />} />

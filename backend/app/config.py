@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     MAX_CRAWL_PAGES: int = 30
     MAX_CAMPAIGN_RECIPIENTS: int = 100
 
+    # Google OAuth (Sign in with Google + Gmail send). Empty = button hidden.
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "http://127.0.0.1:8002/api/auth/google/callback"
+
     # Browser rendering fallback (JS-heavy pages). Disable where Chromium
     # is unavailable (tiny containers): rendering then degrades to an
     # honest "js-shell" event instead of failing.

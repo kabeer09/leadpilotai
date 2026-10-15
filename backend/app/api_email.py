@@ -121,7 +121,8 @@ def campaign_test(campaign_id: int, payload: TestSend,
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
     to_email = str(payload.to_email or user.email)
-    provider = get_provider()
+    from app.emailing import get_provider_for_user
+    provider = get_provider_for_user(user)
     subject = personalize(c.subject, "Test Company", "", to_email)
     body = personalize(c.body, "Test Company", "", to_email)
     result = provider.send(to_email, subject, body)
