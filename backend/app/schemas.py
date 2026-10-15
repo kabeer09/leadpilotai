@@ -53,7 +53,7 @@ class ProfileUpdate(BaseModel):
 class CrawlCreate(BaseModel):
     url: str = Field(max_length=2048)
     name: str | None = Field(default=None, max_length=500)
-    max_pages: int = Field(default=30, ge=1, le=30)
+    max_pages: int = Field(default=30, ge=1, le=500)
     max_depth: int = Field(default=2, ge=0, le=3)
 
     @field_validator("url")

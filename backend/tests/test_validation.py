@@ -117,6 +117,65 @@ def test_fetch_retries_transport_errors():
     assert err is None and html is not None and len(calls) == 2
 
 
+def test_lvm_adapter_parses_buckets(monkeypatch):
+    import app.fair_adapters as fa
+    import httpx
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._p = payload
+
+        def json(self):
+            return self._p
+
+    def fake_get(self, url, **k):
+        if "invalidaz" in url:
+            return FakeResp(["X"])
+        if "az=A" in url:
+            return FakeResp({"items": [
+                {"exhibitorId": "65615", "name": "aspenhome", "type": "exhibitor"},
+                {"exhibitorId": "65615", "name": "aspenhome", "type": "exhibitor"},
+                {"exhibitorId": "", "name": "junk"}]})
+        return FakeResp({"items": []})
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, **k):
+            return fake_get(self, url, **k)
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+    urls, err = fa.discover_profiles(
+        "https://www.lasvegasmarket.com/exhibitor/Directory")
+    assert err is None
+    assert urls == ["https://www.lasvegasmarket.com/exhibitor/65615"]  # deduped
+
+
+def test_adapter_falls_back_gracefully(monkeypatch):
+    import app.fair_adapters as fa
+    import httpx
+
+    def boom(self, *a, **k):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(httpx.Client, "get", boom)
+    urls, err = fa.discover_profiles(
+        "https://www.lasvegasmarket.com/exhibitor/Directory")
+    assert urls is None and err is not None
+    # unknown domains: no adapter, generic crawl
+    urls, err = fa.discover_profiles("https://example.com/")
+    assert urls is None and err is None
+
+
 def test_enrich_visits_contact_pages(monkeypatch):
     """Enrichment must fetch contact/about subpages, not just home."""
     from app.crawler import _enrich_from_official_site

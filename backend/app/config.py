@@ -21,10 +21,12 @@ class Settings(BaseSettings):
     RESEND_API_KEY: str = ""
     RESEND_FROM: str = ""
 
-    DAILY_CRAWL_PAGES: int = 100
+    DAILY_CRAWL_PAGES: int = 2000
     DAILY_EMAIL_LIMIT: int = 50
-    MAX_CRAWL_PAGES: int = 30
+    MAX_CRAWL_PAGES: int = 500
     MAX_CAMPAIGN_RECIPIENTS: int = 100
+    # Parallel crawl workers (local desktop: 3; tiny containers: 1)
+    CRAWL_WORKERS: int = 3
 
     # Google OAuth (Sign in with Google + Gmail send). Empty = button hidden.
     GOOGLE_CLIENT_ID: str = ""

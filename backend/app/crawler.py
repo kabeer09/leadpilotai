@@ -35,34 +35,34 @@ JUNK_EMAIL_DOMAINS = ("example.com", "example.org", "test.com", ".png", ".jpg")
 _cancel_flags: dict[int, threading.Event] = {}
 _threads: dict[int, threading.Thread] = {}
 
-# Shared headless browser (lazy, one at a time — rendering is the slow path)
-_browser = None
+# One headless browser per worker thread (renders run in parallel).
+# Small containers should set CRAWL_WORKERS=1 to stay light.
+_thread_state = threading.local()
 _browser_lock = threading.Lock()
-_playwright = None
 
 
 def _ensure_browser():
-    """Launch the shared Chromium on first use. Returns None when disabled."""
-    global _browser, _playwright
+    """Launch this thread's Chromium on first use. None when disabled."""
     if not settings.PLAYWRIGHT_ENABLED:
         return None
-    with _browser_lock:
-        if _browser is not None:
-            try:
-                if _browser.is_connected():
-                    return _browser
-            except Exception:
-                _browser = None
+    browser = getattr(_thread_state, "browser", None)
+    if browser is not None:
         try:
-            from playwright.sync_api import sync_playwright
-            _playwright = sync_playwright().start()
-            _browser = _playwright.chromium.launch(headless=True)
-            logger.info("Chromium renderer ready")
-            return _browser
-        except Exception as e:
-            logger.warning(f"Browser rendering unavailable: {str(e)[:150]}")
-            _browser = None
-            return None
+            if browser.is_connected():
+                return browser
+        except Exception:
+            pass
+    try:
+        from playwright.sync_api import sync_playwright
+        pw = sync_playwright().start()
+        browser = pw.chromium.launch(headless=True)
+        _thread_state.browser = browser
+        _thread_state.playwright = pw
+        logger.info("Chromium renderer ready (worker thread)")
+        return browser
+    except Exception as e:
+        logger.warning(f"Browser rendering unavailable: {str(e)[:150]}")
+        return None
 
 
 def _render_with_browser(url: str) -> tuple[str | None, str | None]:
@@ -607,129 +607,241 @@ def _enrich_from_official_site(db, user_id: int, company: Company,
     return added, pages_used
 
 
+def _process_url(db, client, job, canon: str, depth: int,
+                 base: str, base_host: str, shared: dict) -> None:
+    """Fetch + extract + save ONE url (worker thread). All writes tenant-scoped."""
+    from queue import Queue as _Q  # local import: stdlib only
+    lock = shared["lock"]
+    with lock:
+        if shared["pages"] >= job.max_pages or shared["cancel"].is_set():
+            return
+        shared["pages"] += 1
+        job.pages_visited = shared["pages"]
+    if SKIP_PATH_RE.search(urlparse(canon).path or ""):
+        db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
+                          url=canon, status="skipped",
+                          detail="non-entity page (login/line/etc.)"))
+        db.commit()
+        return
+    if depth == 0 and not _robots_allowed(base, canon):
+        db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
+                          url=canon, status="blocked",
+                          detail="robots.txt disallow"))
+        db.commit()
+        return
+    html, err = _fetch(client, canon)
+    if err:
+        db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
+                          url=canon, status="error", detail=err[:500]))
+        with lock:
+            shared["errors"].append(f"{canon}: {err}"[:200])
+        db.commit()
+        return
+    data = extract_page(canon, html or "")
+    via = "static"
+    with lock:
+        can_render = shared["render_budget"][0] > 0
+    if _looks_like_js_shell(html, data) and can_render:
+        rendered_html, render_err = _render_with_browser(canon)
+        if rendered_html:
+            with lock:
+                shared["render_budget"][0] -= 1
+            data = extract_page(canon, rendered_html)
+            via = "rendered"
+        elif render_err == "browser rendering unavailable":
+            with lock:
+                shared["errors"].append(
+                    f"{canon}: JS shell — browser rendering unavailable"[:200])
+    host = urlparse(canon).hostname or ""
+    if BOTCHECK_RE.search(f"{data['title']} {(data['h1'] or '')}"):
+        db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
+                          url=canon, status="blocked",
+                          detail="bot-check/denied page — skipped save"))
+        db.commit()
+        time.sleep(PAGE_DELAY)
+        return
+    detail = (f"emails={len(data['emails'])} phones={len(data['phones'])} "
+              f"via={via}")
+    is_list = _is_listing_page(data, host)
+    if is_list:
+        nprof = len(_profile_links(data, host))
+        detail += f" listing:{nprof}-profiles-queued"
+    # Save when it's a company candidate AND (not a pure index,
+    # or a showroom page that happens to list its lines).
+    if _is_company_candidate(data) and (
+            not is_list or _looks_like_profile_url(canon)):
+        comp = _save_company(db, job.user_id, job.source_id,
+                             canon, data, depth)
+        if comp:
+            with lock:
+                shared["companies"] += 1
+                shared["contacts"] += len(data["emails"]) + len(data["phones"])
+            # Exhibitor profile without contacts? Try its official site.
+            if (not data["emails"] and not data["phones"]
+                    and data.get("official_links")):
+                picked = _pick_official_site(data["official_links"])
+                if picked:
+                    extra, e_pages = _enrich_from_official_site(
+                        db, job.user_id, comp, picked[1], client,
+                        render_budget=shared["render_budget"],
+                        job_id=job.id)
+                    with lock:
+                        shared["pages"] += e_pages
+                        shared["contacts"] += extra
+                    if extra:
+                        detail += f" +enriched:{extra}-from-{picked[0]}"
+    stage = "[S1]" if is_list else "[S2]"
+    db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
+                      url=canon, status="ok",
+                      detail=f"{stage} {detail}"[:500]))
+    if depth < job.max_depth:
+        profiles = _profile_links(data, host)
+        # Profile links first: entity pages before site wandering.
+        with lock:
+            for href in profiles:
+                if href not in shared["seen"]:
+                    shared["seen"].add(href)
+                    shared["queue"].put((href, depth + 1))
+        # From a listing page, follow ONLY profiles (no wandering).
+        if not _is_listing_page(data, host):
+            with lock:
+                for href, _label in data["links"][:60]:
+                    h = urlparse(href).hostname or ""
+                    p = urlparse(href).path or ""
+                    clean = href.split("#")[0]
+                    if (h == base_host and not SKIP_PATH_RE.search(p)
+                            and clean not in shared["seen"]):
+                        shared["seen"].add(clean)
+                        shared["queue"].put((clean, depth + 1))
+    with lock:
+        job.companies_found = shared["companies"]
+        job.contacts_found = shared["contacts"]
+        job.pages_visited = shared["pages"]
+    db.commit()
+    time.sleep(PAGE_DELAY)
+
+
+def _worker(job_id: int, user_id: int, source_id: int | None,
+            max_pages: int, max_depth: int, base: str, base_host: str,
+            shared: dict) -> None:
+    """One crawl worker: own HTTP client, own DB session, own browser."""
+    from queue import Empty
+    db = SessionLocal()
+    client = httpx.Client()
+    try:
+        while not shared["cancel"].is_set():
+            try:
+                url, depth = shared["queue"].get(timeout=3)
+            except Empty:
+                continue
+            try:
+                canon = url.split("#")[0]
+                with shared["lock"]:
+                    if canon in shared["seen"]:
+                        continue
+                    shared["seen"].add(canon)
+                # Re-read the job row in this worker's session (fresh state)
+                job = db.query(CrawlJob).filter(CrawlJob.id == job_id).first()
+                if not job:
+                    return
+                _process_url(db, client, job, canon, depth,
+                             base, base_host, shared)
+            except Exception as e:
+                logger.warning(f"Worker error on {url}: {str(e)[:150]}")
+            finally:
+                shared["queue"].task_done()
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+        db.close()
+
+
 def run_job(job_id: int) -> None:
-    """Background crawl worker. All writes tenant-scoped."""
+    """Background crawl: adapter discovery (S1) + worker pool (S2/S3)."""
+    from queue import Queue, Empty
     db = SessionLocal()
     try:
         job = db.query(CrawlJob).filter(CrawlJob.id == job_id).first()
         if not job or job.status not in ("PENDING",):
             return
+        user_id, source_id = job.user_id, job.source_id
+        max_pages, max_depth, seed_url = job.max_pages, job.max_depth, job.url
         job.status = "CRAWLING"
         job.started_at = datetime.utcnow()
         db.commit()
         cancel = _cancel_flags.setdefault(job_id, threading.Event())
 
-        base_host = urlparse(job.url).hostname or ""
-        seen: set[str] = set()
-        queue: list[tuple[str, int]] = [(job.url, 0)]
-        pages = companies = contacts = 0
-        render_left = [settings.MAX_RENDER_PAGES]
-        errors: list[str] = []
-        base = f"{urlparse(job.url).scheme}://{base_host}"
-
-        with httpx.Client() as client:
-            while queue and pages < job.max_pages and not cancel.is_set():
-                url, depth = queue.pop(0)
-                canon = url.split("#")[0]
-                if canon in seen:
-                    continue
-                seen.add(canon)
-                if SKIP_PATH_RE.search(urlparse(canon).path or ""):
-                    db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
-                                      url=canon, status="skipped",
-                                      detail="non-entity page (login/line/etc.)"))
-                    db.commit()
-                    continue
-                if depth == 0 and not _robots_allowed(base, canon):
-                    db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
-                                      url=canon, status="blocked",
-                                      detail="robots.txt disallow"))
-                    db.commit()
-                    continue
-                html, err = _fetch(client, canon)
-                pages += 1
-                job.pages_visited = pages
-                if err:
-                    db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
-                                      url=canon, status="error", detail=err[:500]))
-                    errors.append(f"{canon}: {err}"[:200])
-                else:
-                    data = extract_page(canon, html or "")
-                    via = "static"
-                    if (_looks_like_js_shell(html, data)
-                            and render_left[0] > 0):
-                        rendered_html, render_err = _render_with_browser(canon)
-                        if rendered_html:
-                            render_left[0] -= 1
-                            data = extract_page(canon, rendered_html)
-                            via = "rendered"
-                        elif render_err == "browser rendering unavailable":
-                            errors.append(f"{canon}: JS shell — browser rendering unavailable"[:200])
-                    host = urlparse(canon).hostname or ""
-                    if BOTCHECK_RE.search(f"{data['title']} {(data['h1'] or '')}"):
-                        detail = "bot-check/denied page — skipped save"
-                        db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
-                                          url=canon, status="blocked", detail=detail))
-                        job.pages_visited = pages
-                        db.commit()
-                        time.sleep(PAGE_DELAY)
-                        continue
-                    detail = (f"emails={len(data['emails'])} phones={len(data['phones'])} "
-                              f"via={via}")
-                    is_list = _is_listing_page(data, host)
-                    if is_list:
-                        nprof = len(_profile_links(data, host))
-                        detail += f" listing:{nprof}-profiles-queued"
-                    # Save when it's a company candidate AND (not a pure index,
-                    # or a showroom page that happens to list its lines).
-                    if _is_company_candidate(data) and (
-                            not is_list or _looks_like_profile_url(canon)):
-                        comp = _save_company(db, job.user_id, job.source_id,
-                                             canon, data, depth)
-                        if comp:
-                            companies += 1
-                            contacts += len(data["emails"]) + len(data["phones"])
-                            # Exhibitor profile without contacts? Try its official site.
-                            if (not data["emails"] and not data["phones"]
-                                    and data.get("official_links")):
-                                picked = _pick_official_site(data["official_links"])
-                                extra, e_pages = _enrich_from_official_site(
-                                    db, job.user_id, comp, picked[1], client,
-                                    render_budget=render_left,
-                                    job_id=job.id) if picked else (0, 0)
-                                pages += e_pages
-                                job.pages_visited = pages
-                                if extra:
-                                    site_host = picked[0]
-                                    contacts += extra
-                                    detail += f" +enriched:{extra}-from-{site_host}"
-                    stage = "[S1]" if is_list else "[S2]"
-                    db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
-                                      url=canon, status="ok",
-                                      detail=f"{stage} {detail}"[:500]))
-                    if depth < job.max_depth:
-                        profiles = _profile_links(data, host)
-                        # Profile links first: entity pages before site wandering.
-                        for href in profiles:
-                            if href not in seen:
-                                queue.append((href, depth + 1))
-                        # From a listing page, follow ONLY profiles (no wandering).
-                        if not _is_listing_page(data, host):
-                            for href, _label in data["links"][:60]:
-                                h = urlparse(href).hostname or ""
-                                p = urlparse(href).path or ""
-                                if (h == base_host and not SKIP_PATH_RE.search(p)
-                                        and href.split("#")[0] not in seen):
-                                    queue.append((href.split("#")[0], depth + 1))
-                job.companies_found = companies
-                job.contacts_found = contacts
+        base_host = urlparse(seed_url).hostname or ""
+        base = f"{urlparse(seed_url).scheme}://{base_host}"
+        shared: dict = {
+            "lock": threading.Lock(),
+            "queue": Queue(),
+            "seen": set(),
+            "pages": 0, "companies": 0, "contacts": 0,
+            "render_budget": [max_pages],  # one render max per page, total capped
+            "errors": [],
+            "cancel": cancel,
+        }
+        # Stage 1: adapter enumeration (whole directory in seconds) or seed URL
+        from app.fair_adapters import discover_profiles
+        profiles, adapter_err = discover_profiles(seed_url)
+        if profiles:
+            with shared["lock"]:
+                for href in profiles[:max_pages * 2]:
+                    if href not in shared["seen"]:
+                        shared["seen"].add(href)
+                        shared["queue"].put((href, 1))
+            db.add(CrawlEvent(user_id=user_id, job_id=job_id, url=seed_url,
+                              status="ok",
+                              detail=f"[S1] adapter: {len(profiles)} profiles queued"))
+            db.commit()
+        else:
+            if adapter_err:
+                db.add(CrawlEvent(user_id=user_id, job_id=job_id, url=seed_url,
+                                  status="ok",
+                                  detail=f"[S1] generic crawl ({adapter_err[:100]})"))
                 db.commit()
-                time.sleep(PAGE_DELAY)
+            shared["queue"].put((seed_url, 0))
+
+        workers = max(1, settings.CRAWL_WORKERS)
+        threads = [threading.Thread(
+            target=_worker,
+            args=(job_id, user_id, source_id, max_pages, max_depth,
+                  base, base_host, shared),
+            daemon=True) for _ in range(workers)]
+        for t in threads:
+            t.start()
+        # Wait until budgeted pages are done, queue drains, or cancel.
+        while True:
+            time.sleep(5)
+            with shared["lock"]:
+                done = (shared["pages"] >= max_pages
+                        or shared["queue"].unfinished_tasks == 0)
+            if done or cancel.is_set():
+                break
+        # Drain: stop workers after current items finish
+        cancel_soft = cancel.is_set()
+        if not cancel_soft:
+            # Let workers finish queued items up to budget, then stop them
+            deadline = time.time() + max(60, max_pages * 2)
+            while time.time() < deadline:
+                with shared["lock"]:
+                    if shared["queue"].unfinished_tasks == 0:
+                        break
+                time.sleep(5)
 
         job = db.query(CrawlJob).filter(CrawlJob.id == job_id).first()
+        with shared["lock"]:
+            pages, companies = shared["pages"], shared["companies"]
+            errs = list(shared["errors"])
         job.status = "CANCELLED" if cancel.is_set() else "COMPLETED"
+        job.pages_visited = pages
+        job.companies_found = companies
+        job.contacts_found = shared["contacts"]
         job.finished_at = datetime.utcnow()
-        job.errors = "\n".join(errors[-10:]) or None
+        job.errors = "\n".join(errs[-10:]) or None
         if job.source_id:
             src = db.query(Source).filter(Source.id == job.source_id).first()
             if src:
