@@ -385,15 +385,10 @@ def _save_company(db, user_id: int, source_id: int, url: str, data: dict,
     if not name or "{" in name or "}" in name or "%s" in name:
         return None
     host = urlparse(url).hostname or ""
-    path = urlparse(url).path or "/"
     # Identity: exact profile URL first; homepage URLs additionally match by
     # domain (so re-crawls of a homepage update one row — profiles on a
     # shared directory domain never collapse into each other).
-    existing = db.query(Company).filter(
-        Company.user_id == user_id, Company.profile_url == url).first()
-    if not existing and path in ("", "/"):
-        existing = db.query(Company).filter(
-            Company.user_id == user_id, Company.website == host).first()
+    existing = _find_company(db, user_id, url, host)
     company = existing or Company(user_id=user_id, source_id=source_id, name=name[:500])
     if not existing:
         db.add(company)
@@ -457,6 +452,47 @@ def _save_company(db, user_id: int, source_id: int, url: str, data: dict,
 
 SITE_ANCHOR_RE = re.compile(r"visit|website|official|web site|homepage", re.IGNORECASE)
 CONTACT_PAGE_RE = re.compile(r"contact|about|team|support|impressum|kontakt|reach-us|locations", re.IGNORECASE)
+
+
+def _find_company(db, user_id: int, url: str, host: str):
+    """Find the existing row for a page (profile URL first, homepage by domain)."""
+    existing = db.query(Company).filter(
+        Company.user_id == user_id, Company.profile_url == url).first()
+    if not existing:
+        path = urlparse(url).path or "/"
+        if path in ("", "/"):
+            existing = db.query(Company).filter(
+                Company.user_id == user_id, Company.website == host).first()
+    return existing
+
+
+def company_is_complete(db, company) -> bool:
+    """Complete = product summary + at least one valid (scraped) email.
+
+    Complete companies are never re-crawled; incomplete ones are updated
+    in place when their pages are seen again.
+    """
+    if not (company.product_summary or "").strip():
+        return False
+    return db.query(Contact).filter(
+        Contact.company_id == company.id, Contact.kind == "EMAIL",
+        Contact.verification == "scraped").count() > 0
+
+
+def _should_drop(db, user_id: int, url: str, host: str, data: dict) -> bool:
+    """Drop brand-new junk: no contacts + no official site + not a homepage.
+
+    Existing rows are never dropped (they update in place). Homepage crawls
+    keep EXCLUDED_NO_CONTACT so a later re-crawl can fill them.
+    """
+    if _find_company(db, user_id, url, host) is not None:
+        return False
+    if data.get("emails") or data.get("phones"):
+        return False
+    if data.get("official_links"):
+        return False
+    path = urlparse(url).path or "/"
+    return path not in ("", "/")
 
 
 def apply_contact_validation(db, company) -> str | None:
@@ -610,8 +646,18 @@ def _enrich_from_official_site(db, user_id: int, company: Company,
 def _process_url(db, client, job, canon: str, depth: int,
                  base: str, base_host: str, shared: dict) -> None:
     """Fetch + extract + save ONE url (worker thread). All writes tenant-scoped."""
-    from queue import Queue as _Q  # local import: stdlib only
     lock = shared["lock"]
+    # Already-complete companies are never re-crawled (costs no budget).
+    # Incomplete ones flow through and get updated in place.
+    host0 = urlparse(canon).hostname or ""
+    existing0 = _find_company(db, job.user_id, canon, host0)
+    if existing0 is not None and company_is_complete(db, existing0):
+        db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
+                          url=canon, status="skipped",
+                          detail="already complete — not re-crawled "
+                                 f"(company #{existing0.id})"))
+        db.commit()
+        return
     with lock:
         if shared["pages"] >= job.max_pages or shared["cancel"].is_set():
             return
@@ -670,6 +716,16 @@ def _process_url(db, client, job, canon: str, depth: int,
     # or a showroom page that happens to list its lines).
     if _is_company_candidate(data) and (
             not is_list or _looks_like_profile_url(canon)):
+        # Drop rule: a BRAND-NEW company with no contacts and no official
+        # website to enrich from is junk — don't save it. Existing rows are
+        # never dropped, only updated; rows WITH a site stay EXCLUDED_NO_CONTACT.
+        if _should_drop(db, job.user_id, canon, host, data):
+            detail += " dropped: no contacts and no official website"
+            db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
+                              url=canon, status="skipped", detail=detail[:500]))
+            db.commit()
+            time.sleep(PAGE_DELAY)
+            return
         comp = _save_company(db, job.user_id, job.source_id,
                              canon, data, depth)
         if comp:

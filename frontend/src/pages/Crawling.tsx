@@ -9,6 +9,7 @@ interface Job {
 
 export default function Crawling() {
   const [url, setUrl] = useState('');
+  const [maxPages, setMaxPages] = useState(30);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
   const [msg, setMsg] = useState('');
@@ -27,8 +28,8 @@ export default function Crawling() {
   const start = async () => {
     setMsg('');
     try {
-      const j = await createCrawl({ url });
-      setMsg(`Crawl #${j.id} started.`);
+      const j = await createCrawl({ url, max_pages: maxPages });
+      setMsg(`Crawl #${j.id} started (${maxPages} pages). Already-complete companies are skipped, not re-crawled.`);
       setUrl('');
       load();
     } catch (e: unknown) {
@@ -46,7 +47,24 @@ export default function Crawling() {
         <label className="label">Company or exhibitor-directory URL
           <input className="input mt-1" placeholder="https://example-company.com" value={url} onChange={(e) => setUrl(e.target.value)} />
         </label>
-        <p className="mt-1 text-xs text-gray-500">Only public pages. Respects robots.txt, max 30 pages, ~1s between requests. Localhost/private addresses are blocked.</p>
+        <p className="mt-1 text-xs text-gray-500">Only public pages. Respects robots.txt, ~1s between requests. Localhost/private addresses are blocked.</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="text-xs font-medium text-gray-600">Pages:</span>
+          {[25, 50, 100].map((n) => (
+            <button
+              key={n}
+              onClick={() => setMaxPages(n)}
+              className={`rounded-xl px-3 py-1.5 text-xs font-semibold ${maxPages === n ? 'bg-primary-600 text-white' : 'border border-gray-200 bg-white text-gray-600 hover:bg-gray-50'}`}
+            >
+              {n}
+            </button>
+          ))}
+          <input
+            type="number" min={1} max={500} value={maxPages}
+            onChange={(e) => setMaxPages(Math.max(1, Math.min(500, parseInt(e.target.value) || 30)))}
+            className="input w-24 py-1.5 text-xs" title="Custom page budget (1–500)"
+          />
+        </div>
         <button onClick={start} disabled={!url} className="btn-primary mt-3 text-sm"><Play className="mr-1 h-4 w-4" /> Start crawl</button>
         {msg && <p className="mt-2 text-sm text-gray-700">{msg}</p>}
       </div>

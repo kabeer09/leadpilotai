@@ -120,6 +120,57 @@ def test_template_names_and_short_digit_runs_rejected():
         db.close()
 
 
+def test_complete_check_and_drop_rule():
+    from app.crawler import company_is_complete, _should_drop, _find_company
+    uid, sid = _owner()
+    db = SessionLocal()
+    try:
+        c = Company(user_id=uid, source_id=sid, name="Complete Co",
+                    website="complete.example",
+                    product_summary="Brass decor wholesale")
+        db.add(c)
+        db.flush()
+        assert company_is_complete(db, c) is False  # no email yet
+        db.add(Contact(user_id=uid, company_id=c.id, kind="EMAIL",
+                       value="info@complete.example",
+                       normalized="info@complete.example",
+                       source_url="https://complete.example"))
+        db.commit()
+        assert company_is_complete(db, c) is True
+        assert _find_company(db, uid, "https://dir.example/exhibitor/1",
+                             "dir.example") is None
+        # new profile, no contacts, no site -> drop
+        assert _should_drop(db, uid, "https://dir.example/exhibitor/1",
+                             "dir.example",
+                             {"emails": [], "phones": [],
+                              "official_links": []}) is True
+        # same but with an official site -> keep (enrichable)
+        assert _should_drop(db, uid, "https://dir.example/exhibitor/1",
+                             "dir.example",
+                             {"emails": [], "phones": [],
+                              "official_links": [("x.example", "https://x.example", "Visit")]}) is False
+        # with contacts -> keep
+        assert _should_drop(db, uid, "https://dir.example/exhibitor/1",
+                             "dir.example",
+                             {"emails": ["a@b.example"], "phones": [],
+                              "official_links": []}) is False
+        # homepage crawl without contacts -> keep as EXCLUDED (has its site)
+        assert _should_drop(db, uid, "https://newsite.example/",
+                             "newsite.example",
+                             {"emails": [], "phones": [],
+                              "official_links": []}) is False
+    finally:
+        cid = c.id
+        db.close()
+        d2 = SessionLocal()
+        try:
+            d2.query(Contact).filter(Contact.company_id == cid).delete()
+            d2.query(Company).filter(Company.id == cid).delete()
+            d2.commit()
+        finally:
+            d2.close()
+
+
 def test_save_company_without_contacts_excluded():
     uid, sid = _owner()
     html = "<html><head><title>Ghost Ltd</title></head><body>" + ("word " * 200) + "</body></html>"
