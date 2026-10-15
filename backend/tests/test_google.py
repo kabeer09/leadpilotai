@@ -15,6 +15,84 @@ def test_google_login_unconfigured_without_env(monkeypatch):
     assert r.status_code == 409
 
 
+def _wipe_client():
+    from app.database import SessionLocal
+    from app.models import GoogleOAuthConfig
+    db = SessionLocal()
+    try:
+        db.query(GoogleOAuthConfig).delete()
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_client_status_reports_source_without_secrets(monkeypatch):
+    from app import config as cfg
+    monkeypatch.setattr(cfg.settings, "GOOGLE_CLIENT_ID", "")
+    monkeypatch.setattr(cfg.settings, "GOOGLE_CLIENT_SECRET", "")
+    _wipe_client()
+    r = client.get("/api/auth/google/client-status")
+    assert r.status_code == 200
+    assert r.json()["configured"] is False
+    assert "secret" not in r.text.lower().replace("client_secret", "")
+
+
+def test_signup_pasted_client_enables_login(monkeypatch):
+    from app import config as cfg
+    monkeypatch.setattr(cfg.settings, "GOOGLE_CLIENT_ID", "")
+    monkeypatch.setattr(cfg.settings, "GOOGLE_CLIENT_SECRET", "")
+    _wipe_client()
+    # user pastes client at signup time (no login needed for empty slot)
+    s = client.post("/api/auth/google/client",
+                    json={"client_id": "test-id.apps.googleusercontent.com",
+                          "client_secret": "test-secret"})
+    assert s.status_code == 200, s.text
+    st = client.get("/api/auth/google/client-status").json()
+    assert st["configured"] is True and st["source"] == "signup"
+    # login URL now builds with the pasted client
+    login = client.get("/api/auth/google/login")
+    assert login.status_code == 200
+    assert "test-id.apps.googleusercontent.com" in login.json()["auth_url"]
+    # second anonymous claim is locked
+    again = client.post("/api/auth/google/client",
+                        json={"client_id": "x.apps.googleusercontent.com",
+                              "client_secret": "y"})
+    assert again.status_code == 403
+    _wipe_client()
+
+
+def test_admin_can_replace_client(monkeypatch):
+    from app import config as cfg
+    monkeypatch.setattr(cfg.settings, "GOOGLE_CLIENT_ID", "")
+    monkeypatch.setattr(cfg.settings, "GOOGLE_CLIENT_SECRET", "")
+    _wipe_client()
+    client.post("/api/auth/google/client",
+                json={"client_id": "first.apps.googleusercontent.com",
+                      "client_secret": "s1"})
+    # make an admin and replace with its bearer
+    r = client.post("/api/auth/signup",
+                    json={"email": "gadmin@test.example", "password": "TestPass123"})
+    assert r.status_code in (200, 201)
+    from app.database import SessionLocal
+    from app.models import User
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter(User.email == "gadmin@test.example").first()
+        u.is_admin = True
+        db.commit()
+    finally:
+        db.close()
+    rep = client.post(
+        "/api/auth/google/client",
+        json={"client_id": "second.apps.googleusercontent.com",
+              "client_secret": "s2"},
+        headers={"Authorization": f"Bearer {r.json()['access_token']}"})
+    assert rep.status_code == 200 and rep.json().get("replaced") is True
+    login = client.get("/api/auth/google/login")
+    assert "second.apps.googleusercontent.com" in login.json()["auth_url"]
+    _wipe_client()
+
+
 def _enable_google(monkeypatch):
     from app import config as cfg
     monkeypatch.setattr(cfg.settings, "GOOGLE_CLIENT_ID", "test-client-id")

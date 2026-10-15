@@ -99,10 +99,11 @@ class GmailApiProvider:
     def _access_token(self) -> str:
         if not self.refresh_token:
             raise RuntimeError("Gmail not connected — sign in with Google first")
+        from app.api_google import get_google_config
+        cid, sec, _ = get_google_config()
         resp = httpx.post(
             "https://oauth2.googleapis.com/token",
-            data={"client_id": settings.GOOGLE_CLIENT_ID,
-                  "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            data={"client_id": cid, "client_secret": sec,
                   "refresh_token": self.refresh_token,
                   "grant_type": "refresh_token"},
             timeout=20.0)

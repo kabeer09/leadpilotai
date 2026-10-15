@@ -23,6 +23,21 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class GoogleOAuthConfig(Base):
+    """App-level Google OAuth client, pasted by the owner at signup time.
+
+    Single row (id=1). DB values override env vars so no server restart or
+    .env editing is ever needed. Secrets never leave the server.
+    """
+    __tablename__ = "google_oauth_config"
+    id = Column(Integer, primary_key=True)
+    client_id = Column(Text, nullable=False)
+    client_secret = Column(Text, nullable=False)
+    redirect_uri = Column(String(1024), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow,
+                        onupdate=datetime.utcnow, nullable=False)
+
+
 class OAuthState(Base):
     """CSRF states + one-time login codes for the Google flow (short-lived)."""
     __tablename__ = "oauth_states"
