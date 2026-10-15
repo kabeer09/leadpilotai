@@ -262,13 +262,21 @@ def extract_page(url: str, html: str) -> dict:
     emails = sorted({_norm_email(e) for e in EMAIL_RE.findall(text)} - {None})
     phones = sorted({_norm_phone(p) for p in PHONE_RE.findall(text)} - {None})
     low = text.lower()
-    # A number counts as WhatsApp ONLY when the word appears near it.
+    # A number counts as WhatsApp ONLY when explicitly tied to the word:
+    # either directly after it ("whatsapp: +123…") or within 150 chars.
     # Positions come from regex spans, so separators can't break matching.
-    wa_spans = [m.start() for m in re.finditer(r"whatsapp", low)]
     wa_confirmed = []
+    for pat in (r"(?:whatsapp|wa)[\s:]*([\+]?\d[\d\s\-.()]{7,})",
+                r"whatsapp\s*(?:number|contact|business)?[\s:]*([\+]?\d[\d\s\-.()]{7,})"):
+        for m in re.finditer(pat, low):
+            norm = _norm_phone(m.group(1))
+            if norm and norm not in wa_confirmed:
+                wa_confirmed.append(norm)
+    wa_spans = [m.start() for m in re.finditer(r"whatsapp", low)]
     for m in PHONE_RE.finditer(text):
         norm = _norm_phone(m.group(0))
-        if norm and any(abs(m.start() - w) <= 150 for w in wa_spans):
+        if norm and norm not in wa_confirmed \
+                and any(abs(m.start() - w) <= 150 for w in wa_spans):
             wa_confirmed.append(norm)
 
     links = []
@@ -302,6 +310,8 @@ def extract_page(url: str, html: str) -> dict:
     official = [e for e in external
                 if not any(s in e[0] for s in social)
                 and not any(s in e[1].lower() for s in ("google.", "apple.com", "microsoft."))]
+    from app.extract_profile import extract_profile
+    profile = extract_profile(soup, url)
     return {
         "title": title, "site_name": og_site, "og_title": og_title, "h1": h1,
         "description": desc,
@@ -309,6 +319,8 @@ def extract_page(url: str, html: str) -> dict:
         "whatsapp": sorted(set(wa_confirmed))[:10],
         "links": links, "official_links": official[:10],
         "text_len": len(text),
+        **{f"profile_{k}" if k in ("name", "description") else k: v
+           for k, v in profile.items()},
     }
 
 
@@ -401,6 +413,7 @@ def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
 
     h1 = data.get("h1") or ""
     name = (data.get("site_name")
+            or _clean(data.get("profile_name") or "")
             or (_clean(h1) if len(h1) <= 80 else "")
             or _clean(data.get("title") or "")
             or _clean(data.get("og_title") or ""))
@@ -419,8 +432,24 @@ def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
         db.flush()
     if not company.website:
         company.website = host
-    if data["description"] and not company.product_summary:
-        company.product_summary = data["description"]
+    # Fill-only merges: never erase crawled facts, only complete them.
+    best_desc = data.get("profile_description") or data.get("description")
+    if best_desc and not company.product_summary:
+        company.product_summary = best_desc[:2000]
+    if data.get("industry") and not company.category:
+        company.category = data["industry"]
+    if data.get("country") and not company.country:
+        company.country = data["country"][:100]
+        if data.get("city") and not company.city:
+            company.city = data["city"][:100]
+    if data.get("address") and not getattr(company, "address", None):
+        company.address = data["address"][:2000]
+    if data.get("hall") and not getattr(company, "hall", None):
+        company.hall = data["hall"][:100]
+    if data.get("booth") and not getattr(company, "booth", None):
+        company.booth = data["booth"][:100]
+    if data.get("products_json") and not getattr(company, "products_json", None):
+        company.products_json = data["products_json"]
     company.profile_url = company.profile_url or url
     company.last_verified = datetime.utcnow()
     if company.lifecycle == "EXCLUDED_NO_CONTACT" and (data["emails"] or data["phones"]):

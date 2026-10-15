@@ -298,6 +298,50 @@ def test_concurrent_same_url_saves_once():
         d2.close()
 
 
+def test_profile_fields_fill_from_selectors():
+    """Old-repo parity: hall/booth/address/products/industry land on the row."""
+    from app.crawler import extract_page
+    html = (
+        "<html><head><title>Fair Exhibitor</title></head><body>"
+        "<h1 class='exhibitor-name'>Lampen AG</h1>"
+        "<p class='exhibitor-description'>We manufacture designer lamps and "
+        "chandeliers for wholesale buyers worldwide.</p>"
+        "<div class='location'>Frankfurt, Germany</div>"
+        "<span class='hall'>Hall 3</span><span class='booth'>3.0 A51</span>"
+        "<div class='product-item'>Pendant lamp Luna</div>"
+        "<div class='product-item'>Chandelier Stella</div>"
+        "</body></html>"
+    )
+    d = extract_page("https://fair.example/exhibitor/42", html)
+    assert d["profile_name"] == "Lampen AG"
+    assert d["industry"] == "Lighting"
+    assert d["hall"] == "Hall 3" and d["booth"] == "3.0 A51"
+    assert d["country"] == "Germany" and d["city"] == "Frankfurt"
+    assert len(d["products"]) == 2
+    uid, sid = _owner()
+    db = SessionLocal()
+    try:
+        from app.crawler import _save_company
+        c = _save_company(db, uid, sid, "https://fair.example/exhibitor/42",
+                          dict(d), 1)
+        assert c is not None and c.category == "Lighting"
+        assert c.hall == "Hall 3" and c.booth == "3.0 A51"
+        assert c.country == "Germany"
+        import json as _json
+        assert len(_json.loads(c.products_json)) == 2
+        cid = c.id
+    finally:
+        db.close()
+        d2 = SessionLocal()
+        try:
+            for l in d2.query(Lead).filter(Lead.company_id == cid).all():
+                d2.delete(l)
+            d2.query(Company).filter(Company.id == cid).delete()
+            d2.commit()
+        finally:
+            d2.close()
+
+
 def test_save_company_without_contacts_excluded():
     uid, sid = _owner()
     html = "<html><head><title>Ghost Ltd</title></head><body>" + ("word " * 200) + "</body></html>"

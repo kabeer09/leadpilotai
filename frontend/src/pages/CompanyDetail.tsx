@@ -7,6 +7,8 @@ interface C {
   id: number; name: string; product_summary: string | null; country: string | null;
   city: string | null; website: string | null; category: string | null;
   profile_url: string | null; lifecycle: string; lead_status: string;
+  hall: string | null; booth: string | null; address: string | null;
+  products: { name: string; category: string }[];
   contacts: { id: number; kind: string; value: string; source_url: string | null; source_page: string | null; verification: string }[];
   leads: { id: number; status: string; score: number }[];
   email_history: { id: number; to_email: string; subject: string | null; status: string; sent_at: string | null }[];
@@ -31,9 +33,19 @@ export default function CompanyDetail() {
             <div><dt className="inline text-gray-500">Website: </dt><dd className="inline">{c.website ? <a href={c.website.startsWith('http') ? c.website : `https://${c.website}`} target="_blank" rel="noreferrer" className="text-primary-600">{c.website}</a> : '—'}</dd></div>
             <div><dt className="inline text-gray-500">Location: </dt><dd className="inline">{[c.city, c.country].filter(Boolean).join(', ') || '—'}</dd></div>
             <div><dt className="inline text-gray-500">Category: </dt><dd className="inline">{c.category || '—'}</dd></div>
+            {(c.hall || c.booth) && <div><dt className="inline text-gray-500">Stand: </dt><dd className="inline">{[c.hall, c.booth].filter(Boolean).join(' · ')}</dd></div>}
+            {c.address && <div><dt className="inline text-gray-500">Address: </dt><dd className="inline">{c.address}</dd></div>}
             <div><dt className="inline text-gray-500">Lifecycle: </dt><dd className="inline">{c.lifecycle}</dd></div>
           </dl>
           {c.product_summary && <p className="mt-3 text-sm text-gray-700">{c.product_summary}</p>}
+          {c.products && c.products.length > 0 && (
+            <div className="mt-3">
+              <p className="text-sm font-medium text-gray-700">Products ({c.products.length})</p>
+              <ul className="mt-1 max-h-40 space-y-1 overflow-y-auto text-sm text-gray-600">
+                {c.products.slice(0, 20).map((p, i) => <li key={i}>• {p.name}</li>)}
+              </ul>
+            </div>
+          )}
         </div>
         <div className="card">
           <h2 className="font-semibold">Contacts ({c.contacts.length})</h2>

@@ -128,10 +128,17 @@ def get_company(company_id: int, db: Session = Depends(get_db),
         crawls = db.query(CrawlJob).filter(
             CrawlJob.user_id == user.id, CrawlJob.source_id == c.source_id).order_by(
             CrawlJob.id.desc()).limit(10).all()
+    import json as _json
+    try:
+        products = _json.loads(c.products_json) if c.products_json else []
+    except Exception:
+        products = []
     return {
         "id": c.id, "name": c.name, "product_summary": c.product_summary,
         "country": c.country, "city": c.city, "website": c.website,
         "category": c.category, "profile_url": c.profile_url,
+        "hall": c.hall, "booth": c.booth, "address": c.address,
+        "products": products,
         "lifecycle": c.lifecycle, "lead_status": c.lead_status,
         "confidence": c.confidence, "first_seen": c.first_seen,
         "last_verified": c.last_verified,

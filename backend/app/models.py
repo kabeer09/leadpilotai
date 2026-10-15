@@ -111,6 +111,11 @@ class Company(Base):
     website = Column(String(2048), nullable=True)
     category = Column(String(255), nullable=True, index=True)
     profile_url = Column(String(2048), nullable=True)
+    # Exhibitor-profile fields (old-pipeline parity, all nullable/additive)
+    hall = Column(String(100), nullable=True)
+    booth = Column(String(100), nullable=True)
+    address = Column(Text, nullable=True)
+    products_json = Column(Text, nullable=True)  # JSON list [{name, category}]
     # lifecycle: active | EXCLUDED_NO_CONTACT | ARCHIVED | MERGED
     lifecycle = Column(String(30), default="active", nullable=False, index=True)
     merged_into_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
