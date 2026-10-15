@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     DAILY_CRAWL_PAGES: int = 2000
     DAILY_EMAIL_LIMIT: int = 50
     MAX_CRAWL_PAGES: int = 500
-    MAX_CAMPAIGN_RECIPIENTS: int = 100
+    MAX_CAMPAIGN_RECIPIENTS: int = 500
     # Parallel crawl workers (local desktop: 3; tiny containers: 1)
     CRAWL_WORKERS: int = 3
 

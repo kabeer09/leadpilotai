@@ -70,7 +70,9 @@ class CampaignCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     subject: str = Field(min_length=1, max_length=500)
     body: str = Field(min_length=1)
-    lead_ids: list[int] = Field(default_factory=list, max_length=100)
+    # Strict allow-list: ONLY these leads are ever queued. The backend
+    # never adds, discovers, or tops up recipients on its own.
+    lead_ids: list[int] = Field(default_factory=list, max_length=500)
     followup_enabled: bool = False
     followup_delay_hours: int = Field(default=24, ge=1, le=168)
 

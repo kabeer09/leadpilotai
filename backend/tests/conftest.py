@@ -30,3 +30,12 @@ def _clear_rate_limits():
     deps._hits.clear()
     yield
     deps._hits.clear()
+
+
+@pytest.fixture(autouse=True)
+def _force_dryrun_provider(monkeypatch):
+    """Tests never send real emails: pin the provider to dry-run even if
+    the local .env enables gmail/smtp for manual verification."""
+    from app import config as cfg
+    monkeypatch.setattr(cfg.settings, "EMAIL_PROVIDER", "dryrun")
+    yield

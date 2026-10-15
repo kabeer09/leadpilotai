@@ -6,7 +6,11 @@ import { listCampaigns, createCampaign } from '../lib/api';
 export default function Campaigns() {
   const [items, setItems] = useState<{ id: number; name: string; status: string }[]>([]);
   const [form, setForm] = useState({ name: '', subject: '', body: '', leadIds: '' });
+  const [batchLimit, setBatchLimit] = useState<number | null>(null);
   const [msg, setMsg] = useState('');
+
+  const parsedIds = form.leadIds.split(',').map((s) => parseInt(s.trim())).filter((n) => !isNaN(n));
+  const effectiveIds = batchLimit ? parsedIds.slice(0, batchLimit) : parsedIds;
 
   const load = async () => {
     try {
@@ -20,9 +24,9 @@ export default function Campaigns() {
   const create = async () => {
     setMsg('');
     try {
-      // Offer all leads as selectable IDs; keep simple: comma-separated lead IDs
-      const leadIds = form.leadIds.split(',').map((s) => parseInt(s.trim())).filter((n) => !isNaN(n));
-      const r = await createCampaign({ name: form.name, subject: form.subject, body: form.body, lead_ids: leadIds });
+      // Strict: only YOUR listed IDs are queued (first N if a preset applies).
+      // The backend never adds recipients on its own.
+      const r = await createCampaign({ name: form.name, subject: form.subject, body: form.body, lead_ids: effectiveIds });
       setMsg(`Draft created: ${r.added} recipients added (${r.skipped_suppressed} suppressed, ${r.skipped_contacted} already contacted, ${r.skipped_noemail} no email).`);
       setForm({ name: '', subject: '', body: '', leadIds: '' });
       load();
@@ -42,7 +46,23 @@ export default function Campaigns() {
           <input className="input" placeholder="Subject — e.g. Partnership inquiry for {company}" value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} />
           <textarea className="input" rows={5} placeholder="Body…" value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
           <input className="input" placeholder="Lead IDs, comma-separated (see Leads page)" value={form.leadIds} onChange={(e) => setForm({ ...form, leadIds: e.target.value })} />
-          <button onClick={create} disabled={!form.name || !form.subject || !form.body} className="btn-primary w-fit text-sm">Create draft</button>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-medium text-gray-600">Batch size:</span>
+            {[5, 25, 50, 100, 500].map((n) => (
+              <button
+                key={n}
+                onClick={() => setBatchLimit(batchLimit === n ? null : n)}
+                className={`rounded-xl px-3 py-1.5 text-xs font-semibold ${batchLimit === n ? 'bg-primary-600 text-white' : 'border border-gray-200 bg-white text-gray-600 hover:bg-gray-50'}`}
+              >
+                {n}
+              </button>
+            ))}
+            <span className="text-xs text-gray-500">
+              {parsedIds.length === 0 ? 'paste lead IDs above' : batchLimit ? `first ${Math.min(batchLimit, parsedIds.length)} of ${parsedIds.length} will queue` : `all ${parsedIds.length} will queue`}
+            </span>
+          </div>
+          <p className="text-xs text-gray-500">Only your listed IDs queue — nothing is added automatically. Ineligible ones (suppressed, already contacted, no email) are reported as skipped. Sending still needs preview + double confirmation, max 50/day.</p>
+          <button onClick={create} disabled={!form.name || !form.subject || !form.body || effectiveIds.length === 0} className="btn-primary w-fit text-sm">Create draft ({effectiveIds.length})</button>
         </div>
         {msg && <p className="mt-2 text-sm text-gray-700">{msg}</p>}
       </div>
