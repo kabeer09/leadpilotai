@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # is unavailable (tiny containers): rendering then degrades to an
     # honest "js-shell" event instead of failing.
     PLAYWRIGHT_ENABLED: bool = True
-    MAX_RENDER_PAGES: int = 10
+    MAX_RENDER_PAGES: int = 25
 
     # Rate limits (requests per minute per IP)
     RATE_LOGIN_PER_MIN: int = 10

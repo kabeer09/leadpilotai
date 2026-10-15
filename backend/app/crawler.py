@@ -290,10 +290,12 @@ PROFILE_PATH_RE = re.compile(
     r"vendor|vendors|supplier|suppliers|member|members|brand|brands)/[^/?#]+",
     re.IGNORECASE)
 
-# Pages that are never companies and never worth following
+# Pages that are never companies and never worth following.
+# /line/ sub-pages are brand lines living under an exhibitor (no standalone
+# contacts, template-only names) — skip them, the exhibitor page is the prize.
 SKIP_PATH_RE = re.compile(
     r"/(login|log-in|signin|sign-in|signup|sign-up|register|account|auth|"
-    r"identity|password|checkout|cart|search\?|admin|wp-admin|api/)",
+    r"identity|password|checkout|cart|search\?|admin|wp-admin|api/|line/)",
     re.IGNORECASE)
 
 BOTCHECK_RE = re.compile(
@@ -321,6 +323,24 @@ def _profile_links(data: dict, host: str) -> list[str]:
             continue
         out.append(href.split("#")[0])
     return sorted(set(out))
+
+
+INDEX_WORDS = {"directory", "index", "list", "lists", "all", "search",
+               "browse", "page", "exhibitors", "companies", "profiles"}
+
+
+def _looks_like_profile_url(url: str) -> bool:
+    """Is this URL itself an entity profile page (vs a section index)?"""
+    if SKIP_PATH_RE.search(urlparse(url).path or ""):
+        return False
+    m = PROFILE_PATH_RE.search(urlparse(url).path or "")
+    if not m:
+        return False
+    slug = m.group(0).rstrip("/").split("/")[-1]
+    if re.search(r"\d", slug):
+        return True
+    low = slug.lower()
+    return len(slug) > 12 and not any(w in low for w in INDEX_WORDS)
 
 
 def _is_listing_page(data: dict, host: str) -> bool:
@@ -523,6 +543,12 @@ def run_job(job_id: int) -> None:
                 if canon in seen:
                     continue
                 seen.add(canon)
+                if SKIP_PATH_RE.search(urlparse(canon).path or ""):
+                    db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
+                                      url=canon, status="skipped",
+                                      detail="non-entity page (login/line/etc.)"))
+                    db.commit()
+                    continue
                 if depth == 0 and not _robots_allowed(base, canon):
                     db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
                                       url=canon, status="blocked",
@@ -559,10 +585,14 @@ def run_job(job_id: int) -> None:
                         continue
                     detail = (f"emails={len(data['emails'])} phones={len(data['phones'])} "
                               f"via={via}")
-                    if _is_listing_page(data, host):
+                    is_list = _is_listing_page(data, host)
+                    if is_list:
                         nprof = len(_profile_links(data, host))
                         detail += f" listing:{nprof}-profiles-queued"
-                    elif _is_company_candidate(data):
+                    # Save when it's a company candidate AND (not a pure index,
+                    # or a showroom page that happens to list its lines).
+                    if _is_company_candidate(data) and (
+                            not is_list or _looks_like_profile_url(canon)):
                         comp = _save_company(db, job.user_id, job.source_id,
                                              canon, data, depth)
                         if comp:

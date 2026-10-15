@@ -29,6 +29,36 @@ def test_ssrf_blocks_private_and_metadata():
     assert err is None
 
 
+def test_ssrf_allows_nat64_beside_public(monkeypatch):
+    """DNS64/NAT64 answers (64:ff9b::/96 + public A) must not block crawls."""
+    import socket
+    from app import ssrf
+    real = socket.getaddrinfo
+
+    def fake(host, *a, **k):
+        if host == "nat64.example":
+            return [(2, 1, 6, "", ("64:ff9b::4272:75ec", 0)),
+                    (2, 1, 6, "", ("66.114.117.236", 0))]
+        return real(host, *a, **k)
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake)
+    _, err = validate_url("https://nat64.example/")
+    assert err is None
+    # metadata alongside public still blocked
+    import ipaddress
+    assert ssrf._ip_never_ok(ipaddress.ip_address("169.254.169.254")) is True
+
+
+def test_line_pages_skipped_not_queued():
+    from app.crawler import SKIP_PATH_RE, _looks_like_profile_url
+    assert SKIP_PATH_RE.search("/exhibitor/124068/line/115ab1e3-uuid")
+    assert not _looks_like_profile_url(
+        "https://www.lasvegasmarket.com/exhibitor/124068/line/115ab1e3")
+    assert _looks_like_profile_url("https://www.lasvegasmarket.com/exhibitor/124068")
+    assert not _looks_like_profile_url(
+        "https://www.lasvegasmarket.com/exhibitor/exhibitor-directory")
+
+
 def test_crawl_rejects_blocked_url():
     tokens = _user("crawl1@test.example")
     r = client.post("/api/crawls", json={"url": "http://127.0.0.1:9/"},
