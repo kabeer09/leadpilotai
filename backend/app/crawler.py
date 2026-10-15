@@ -19,6 +19,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models import Source, CrawlJob, CrawlEvent, Company, Contact, Lead
 from app.ssrf import validate_url
+from app.validation import domain_of, _base_domain
 
 logger = logging.getLogger(__name__)
 
@@ -546,6 +547,31 @@ def company_is_complete(db, company) -> bool:
         Contact.verification == "scraped").count() > 0
 
 
+def strip_owner_emails(data: dict, canon: str, shared: dict) -> int:
+    """Drop the site owner's own addresses from third-party profile pages.
+
+    Every fair profile footer carries info@<fair-domain> — that is the
+    MARKET's mailbox, never the exhibitor's. Without this, all exhibitors
+    end up sharing one email (systematic misattribution). Homepages keep
+    everything (the site speaks for itself there).
+    Returns number removed.
+    """
+    if not shared.get("directory_mode"):
+        return 0
+    if not _looks_like_profile_url(canon):
+        return 0
+    try:
+        fam = _base_domain(domain_of(urlparse(canon).hostname or ""))
+    except Exception:
+        return 0
+    if not fam:
+        return 0
+    before = len(data.get("emails", []))
+    data["emails"] = [e for e in data.get("emails", [])
+                      if _base_domain(domain_of(e)) != fam]
+    return before - len(data["emails"])
+
+
 def _save_allowed(data: dict, canon: str, is_list: bool,
                   shared: dict) -> tuple[bool, str]:
     """Save gate. In directory mode ONLY profile-URL pages with contacts
@@ -824,6 +850,9 @@ def _process_url(db, client, job, canon: str, depth: int,
                 data[key] = det[key]
         if det.get("company_name"):
             data["details_name"] = det["company_name"]
+    stripped = strip_owner_emails(data, canon, shared)
+    if stripped:
+        det_tag += f" -owner-mail x{stripped}"
         if det.get("company_name") and not data.get("profile_name"):
             data["profile_name"] = det["company_name"]
         det_tag = (f" +details:{len(det.get('emails', []))}e/"

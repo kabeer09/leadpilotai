@@ -294,6 +294,24 @@ def test_directory_mode_saves_only_viable_profiles():
     assert urls == ["https://www.highpointmarket.org/exhibitor/16088"]
 
 
+def test_owner_emails_stripped_on_profiles():
+    from app.crawler import strip_owner_emails
+    shared = {"directory_mode": True}
+    data = {"emails": ["info@highpointmarket.org", "sales@exhibitor.example"]}
+    n = strip_owner_emails(
+        data, "https://www.highpointmarket.org/exhibitor/16088", shared)
+    assert n == 1 and data["emails"] == ["sales@exhibitor.example"]
+    # homepages keep everything
+    home = {"emails": ["info@mysite.example"]}
+    assert strip_owner_emails(
+        home, "https://mysite.example/", shared) == 0
+    assert home["emails"] == ["info@mysite.example"]
+    # generic crawls unaffected
+    assert strip_owner_emails(
+        {"emails": ["a@fair.example"]},
+        "https://fair.example/exhibitor/1", {}) == 0
+
+
 def test_concurrent_same_url_saves_once():
     """Two workers, same profile URL, same instant -> exactly one row."""
     import threading
