@@ -250,6 +250,48 @@ def test_directory_mode_saves_only_viable_profiles():
          ("aspen.example", "https://www.aspen.example", "Visit aspen.example")],
         "fair.example")
     assert picked == ("aspen.example", "https://www.aspen.example")
+    # single unambiguous candidate is accepted
+    assert _pick_official_site(
+        [("only.example", "https://only.example", "")],
+        "fair.example") == ("only.example", "https://only.example")
+    # multiple unsignalled candidates are refused
+    assert _pick_official_site(
+        [("a.example", "https://a.example", ""),
+         ("b.example", "https://b.example", "")],
+        "fair.example") is None
+    # high point adapter: whole directory from one autocomplete call
+    from app.fair_adapters import _highpoint_profiles
+    import app.fair_adapters as fa
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return [{"value": "/exhibitor/16088", "label": "16 West"},
+                    {"value": "/about", "label": "About"},
+                    {"value": "/exhibitor/16088", "label": "16 West"}]
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, **k):
+            return _FakeResp()
+
+    real_client = fa.httpx.Client
+    fa.httpx.Client = _FakeClient
+    try:
+        urls, err = _highpoint_profiles()
+    finally:
+        fa.httpx.Client = real_client
+    assert err is None
+    assert urls == ["https://www.highpointmarket.org/exhibitor/16088"]
 
 
 def test_concurrent_same_url_saves_once():

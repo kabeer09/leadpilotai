@@ -318,9 +318,38 @@ def fetch_exhibitor_details(page_url: str) -> dict | None:
     return None
 
 
+def _highpoint_profiles() -> tuple[list[str], str | None]:
+    """High Point Market: whole directory via the public autocomplete JSON."""
+    base = "https://www.highpointmarket.org"
+    try:
+        with httpx.Client(timeout=25.0,
+                          headers={"User-Agent": UA}) as client:
+            r = client.get(f"{base}/api/exhibitors/autocomplete?term=a")
+            if r.status_code != 200:
+                return None, f"autocomplete HTTP {r.status_code}"
+            try:
+                items = r.json()
+            except Exception:
+                return None, "autocomplete bad JSON"
+            if not isinstance(items, list) or not items:
+                return None, "autocomplete empty"
+            seen: set[str] = set()
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                val = str(it.get("value") or "").strip()
+                if val.startswith("/exhibitor/"):
+                    seen.add(base + val)
+            urls = sorted(seen)
+            return (urls, None) if urls else (None, "no profile links found")
+    except Exception as e:
+        return None, f"High Point adapter failed: {str(e)[:150]}"
+
+
 URL_ADAPTERS: list[tuple[str, callable]] = [
     ("lasvegasmarket.com", _lasvegas_profiles),
     ("atlantamarket.com", _atlanta_profiles),
+    ("highpointmarket.org", _highpoint_profiles),
 ]
 
 

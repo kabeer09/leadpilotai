@@ -631,6 +631,12 @@ def _pick_official_site(official_links: list[tuple[str, str, str]],
     for host, url, anchor in cands:
         if SITE_ANCHOR_RE.search(anchor or ""):
             return host, url
+    # Exactly one candidate is unambiguous (e.g. a profile page whose only
+    # external business link is the exhibitor's own site).
+    if len(cands) == 1:
+        return cands[0][0], cands[0][1]
+    # No signal: return None rather than a random outbound link (once
+    # enriched a ticket shop as an "official site").
     return None
 
 
