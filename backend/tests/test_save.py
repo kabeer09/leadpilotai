@@ -1,6 +1,6 @@
 """Crawler save path: company+contacts+lead creation, exclusion, idempotency."""
 from app.database import SessionLocal
-from app.models import User, Source, Company, Contact, Lead
+from app.models import User, Source, Company, Contact, Lead, CrawlEvent
 from app.crawler import _save_company, extract_page
 
 
@@ -169,6 +169,55 @@ def test_complete_check_and_drop_rule():
             d2.commit()
         finally:
             d2.close()
+
+
+def test_queued_urls_are_processed_not_skipped(monkeypatch):
+    """Regression: worker must process every queue take (enqueue dedupes)."""
+    import app.crawler as craw
+    from app.models import Source, CrawlJob
+    uid, sid = _owner()
+    html = ("<html><head><title>Pool Co</title></head><body>"
+            "Mail hello@pool.example. "
+            '<a href="/about">About</a> '
+            '<a href="/contact">Contact</a></body></html>')
+
+    def fake_fetch(client, url):
+        return html, None
+
+    monkeypatch.setattr(craw, "_fetch", fake_fetch)
+    monkeypatch.setattr(craw, "_robots_allowed", lambda base, url: True)
+    monkeypatch.setattr(craw, "_render_with_browser", lambda url: (None, "off"))
+    monkeypatch.setattr(craw.settings, "CRAWL_WORKERS", 2)
+    db = SessionLocal()
+    try:
+        job = CrawlJob(user_id=uid, source_id=sid, url="https://pool.example/",
+                       max_pages=3, max_depth=1, status="PENDING")
+        db.add(job)
+        db.commit()
+        jid = job.id
+    finally:
+        db.close()
+    craw.run_job(jid)
+    db = SessionLocal()
+    try:
+        job = db.query(CrawlJob).filter(CrawlJob.id == jid).first()
+        assert job.status == "COMPLETED"
+        assert job.pages_visited >= 2, "queued links must be fetched, not skipped"
+        assert job.companies_found >= 1
+        for l in db.query(Lead).filter(
+                Lead.company_id.in_(
+                    db.query(Company.id).filter(Company.user_id == uid,
+                                               Company.name == "Pool Co"))).all():
+            db.delete(l)
+        for c in db.query(Company).filter(
+                Company.user_id == uid, Company.name == "Pool Co").all():
+            db.query(Contact).filter(Contact.company_id == c.id).delete()
+            db.delete(c)
+        db.query(CrawlEvent).filter(CrawlEvent.job_id == jid).delete()
+        db.query(CrawlJob).filter(CrawlJob.id == jid).delete()
+        db.commit()
+    finally:
+        db.close()
 
 
 def test_save_company_without_contacts_excluded():

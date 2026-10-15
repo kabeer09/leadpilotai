@@ -791,11 +791,11 @@ def _worker(job_id: int, user_id: int, source_id: int | None,
             except Empty:
                 continue
             try:
+                # De-duplicated at enqueue time (seen+lock there); every
+                # take here is unique work. A second check would skip
+                # EVERYTHING (enqueue already marks seen) — that bug
+                # once zeroed whole directory crawls.
                 canon = url.split("#")[0]
-                with shared["lock"]:
-                    if canon in shared["seen"]:
-                        continue
-                    shared["seen"].add(canon)
                 # Re-read the job row in this worker's session (fresh state)
                 job = db.query(CrawlJob).filter(CrawlJob.id == job_id).first()
                 if not job:
