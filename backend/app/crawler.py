@@ -457,23 +457,36 @@ def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
         company.lifecycle = "active"
     db.flush()
 
+    from app.validation import normalize_email, normalize_phone
+
+    def _split(values):
+        for v in values or []:
+            for part in re.split(r"[;,]", str(v)):
+                part = part.strip()
+                if part:
+                    yield part
+
     have = {(c.kind, c.normalized) for c in
             db.query(Contact).filter(Contact.company_id == company.id).all()}
     n_new = 0
     primaries = {"EMAIL": not any(k == "EMAIL" for k, _ in have)}
-    for e in data["emails"]:
-        if ("EMAIL", e) not in have:
+    for e in _split(data["emails"]):
+        norm = normalize_email(e)
+        if norm and ("EMAIL", norm) not in have:
             db.add(Contact(user_id=user_id, company_id=company.id, kind="EMAIL",
-                           value=e, normalized=e, source_url=url,
+                           value=norm, normalized=norm, source_url=url,
                            source_page=_page_type(url),
                            is_primary=primaries["EMAIL"]))
+            have.add(("EMAIL", norm))
             primaries["EMAIL"] = False
             n_new += 1
     for p in data["phones"]:
-        if ("PHONE", p) not in have:
+        norm = normalize_phone(p)
+        if norm and ("PHONE", norm) not in have:
             db.add(Contact(user_id=user_id, company_id=company.id, kind="PHONE",
-                           value=p, normalized=p, source_url=url,
+                           value=norm, normalized=norm, source_url=url,
                            source_page=_page_type(url)))
+            have.add(("PHONE", norm))
             n_new += 1
     for w in data["whatsapp"]:
         if ("WHATSAPP", w) not in have:
