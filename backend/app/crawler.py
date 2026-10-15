@@ -892,15 +892,14 @@ def _process_url(db, client, job, canon: str, depth: int,
                 data[key] = det[key]
         if det.get("company_name"):
             data["details_name"] = det["company_name"]
-    stripped = strip_owner_emails(data, canon, shared)
-    if stripped:
-        det_tag += f" -owner-mail x{stripped}"
-        if det.get("company_name") and not data.get("profile_name"):
-            data["profile_name"] = det["company_name"]
+    if det:
         det_tag = (f" +details:{len(det.get('emails', []))}e/"
                    f"{len(det.get('phones', []))}p")
         if det.get("contact_names"):
             det_tag += f" ({', '.join(det['contact_names'][:2])})"
+    stripped = strip_owner_emails(data, canon, shared)
+    if stripped:
+        det_tag += f" -owner-mail x{stripped}"
     if _need_render:
         rendered_html, render_err = _render_with_browser(canon)
         if rendered_html:
@@ -910,7 +909,7 @@ def _process_url(db, client, job, canon: str, depth: int,
             via = "rendered"
             # Re-merge the details card (re-extraction wipes it) + keep the
             # fair's company name as fallback.
-            if det:
+            if det is not None:
                 for e in det.get("emails", []):
                     if e not in data["emails"]:
                         data["emails"].append(e)
@@ -1003,6 +1002,24 @@ def _process_url(db, client, job, canon: str, depth: int,
     time.sleep(PAGE_DELAY)
 
 
+def _close_worker_browser() -> None:
+    """Release this thread's Chromium (stops headless-chrome pileup)."""
+    browser = getattr(_thread_state, "browser", None)
+    pw = getattr(_thread_state, "playwright", None)
+    _thread_state.browser = None
+    _thread_state.playwright = None
+    try:
+        if browser is not None:
+            browser.close()
+    except Exception:
+        pass
+    try:
+        if pw is not None:
+            pw.stop()
+    except Exception:
+        pass
+
+
 def _worker(job_id: int, user_id: int, source_id: int | None,
             max_pages: int, max_depth: int, base: str, base_host: str,
             shared: dict) -> None:
@@ -1012,6 +1029,8 @@ def _worker(job_id: int, user_id: int, source_id: int | None,
     client = httpx.Client()
     try:
         while not shared["cancel"].is_set():
+            if shared.get("shutdown"):
+                break
             try:
                 url, depth = shared["queue"].get(timeout=3)
             except Empty:
@@ -1034,9 +1053,17 @@ def _worker(job_id: int, user_id: int, source_id: int | None,
                              base, base_host, shared)
             except Exception as e:
                 logger.warning(f"Worker error on {url}: {str(e)[:150]}")
+                # A failed flush poisons the whole session (every later take
+                # would die with PendingRollbackError). Reset it so one bad
+                # take can't cascade into a dead crawl.
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
             finally:
                 shared["queue"].task_done()
     finally:
+        _close_worker_browser()
         try:
             client.close()
         except Exception:
@@ -1202,6 +1229,12 @@ def run_job(job_id: int) -> None:
                     if shared["queue"].unfinished_tasks == 0:
                         break
                 time.sleep(5)
+        # Graceful shutdown: workers exit (closing their browsers — no
+        # headless-chrome pileup), then finalize counters.
+        with shared["lock"]:
+            shared["shutdown"] = True
+        for t in threads:
+            t.join(timeout=45)
 
         job = db.query(CrawlJob).filter(CrawlJob.id == job_id).first()
         with shared["lock"]:

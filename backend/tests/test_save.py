@@ -465,6 +465,159 @@ def test_progress_throttled_not_per_take(monkeypatch):
         db.close()
 
 
+def test_process_url_survives_render_without_details(monkeypatch):
+    """Shell page + det=None (non-ANDMORE) must render and save, never crash."""
+    import threading
+    from queue import Queue
+    import app.crawler as craw
+    from app.models import Source, CrawlJob
+    uid, sid = _owner()
+    shell_html = ("<html><head><title>Shop Co</title></head><body>"
+                  "<div id='root'></div><script src='/static/app.js'></script>"
+                  "</body></html>")
+    real_html = ("<html><head><title>Shop Co</title></head><body>"
+                 "<h1>Shop Co</h1><p>Mail hello@shop.example, call +1-555-0100. "
+                 "Quality goods for every home.</p></body></html>")
+    monkeypatch.setattr(craw, "_fetch", lambda client, url: (shell_html, None))
+    monkeypatch.setattr(craw, "_render_with_browser",
+                        lambda url: (real_html, None))
+    monkeypatch.setattr(craw, "_robots_allowed", lambda base, url: True)
+    monkeypatch.setattr("app.fair_adapters.fetch_exhibitor_details",
+                        lambda url: None)
+    monkeypatch.setattr(craw.settings, "CRAWL_WORKERS", 1)
+    db = SessionLocal()
+    try:
+        job = CrawlJob(user_id=uid, source_id=sid, url="https://shop.example/",
+                       max_pages=5, max_depth=0, status="CRAWLING")
+        db.add(job)
+        db.commit()
+        jid = job.id
+    finally:
+        db.close()
+    shared = {"lock": threading.Lock(), "queue": Queue(), "seen": set(),
+              "pages": 0, "companies": 0, "contacts": 0,
+              "render_budget": [5], "errors": [],
+              "cancel": threading.Event(), "directory_mode": False}
+    wdb = SessionLocal()
+    wjob = wdb.query(CrawlJob).filter(CrawlJob.id == jid).first()
+    import httpx
+    client = httpx.Client()
+    try:
+        craw._process_url(wdb, client, wjob, "https://shop.example/", 0,
+                          "https://shop.example", "shop.example", shared)
+        assert shared["errors"] == []
+        assert shared["companies"] == 1
+    finally:
+        client.close()
+        wdb.close()
+    db = SessionLocal()
+    try:
+        c = db.query(Company).filter(
+            Company.user_id == uid, Company.name == "Shop Co").first()
+        assert c is not None
+        cid = c.id
+    finally:
+        db.close()
+    d2 = SessionLocal()
+    try:
+        for l in d2.query(Lead).filter(Lead.company_id == cid).all():
+            d2.delete(l)
+        d2.query(Contact).filter(Contact.company_id == cid).delete()
+        d2.query(Company).filter(Company.id == cid).delete()
+        d2.query(CrawlJob).filter(CrawlJob.id == jid).delete()
+        d2.commit()
+    finally:
+        d2.close()
+
+
+def test_poisoned_session_recovered_per_take():
+    """A flush failure on one take must not poison later takes (lock storm).
+
+    Runs the REAL worker loop: take 1 raises mid-flush, take 2 must still
+    save thanks to the worker's per-take rollback.
+    """
+    import threading
+    import time
+    from queue import Queue
+    import app.crawler as craw
+    from app.models import Source, CrawlJob
+    uid, sid = _owner()
+    db = SessionLocal()
+    try:
+        job = CrawlJob(user_id=uid, source_id=sid,
+                       url="https://poison.example/", max_pages=5,
+                       max_depth=0, status="CRAWLING")
+        db.add(job)
+        db.commit()
+        jid = job.id
+    finally:
+        db.close()
+    poisoned = {"done": False}
+    real_process = craw._process_url
+
+    def flaky_process(db_, client_, job_, canon, depth, base, host, shared):
+        if not poisoned["done"]:
+            poisoned["done"] = True
+            db_.add(Company(user_id=uid, source_id=sid, name="Poison Co"))
+            db_.flush()
+            raise Exception("database is locked")
+        return real_process(db_, client_, job_, canon, depth, base,
+                            host, shared)
+
+    html = ("<html><head><title>Heal Co</title></head><body>"
+            "Mail heal@heal.example. Goods for every home, shop with us today "
+            "for quality items and friendly service.</body></html>")
+    orig_fetch = craw._fetch
+    orig_process = craw._process_url
+    craw._fetch = lambda client, url: (html, None)
+    craw._process_url = flaky_process
+    shared = {"lock": threading.Lock(), "queue": Queue(), "seen": set(),
+              "pages": 0, "companies": 0, "contacts": 0,
+              "render_budget": [5], "errors": [],
+              "cancel": threading.Event(), "directory_mode": False}
+    shared["queue"].put(("https://poison.example/", 0))
+    shared["queue"].put(("https://heal.example/", 0))
+    t = threading.Thread(
+        target=craw._worker,
+        args=(jid, uid, sid, 5, 0, "https://poison.example",
+              "poison.example", shared),
+        daemon=True)
+    try:
+        t.start()
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            with shared["lock"]:
+                if shared["queue"].unfinished_tasks == 0:
+                    break
+            time.sleep(1)
+        shared["shutdown"] = True
+        t.join(timeout=20)
+        db = SessionLocal()
+        try:
+            got = db.query(Company).filter(
+                Company.user_id == uid, Company.name == "Heal Co").first()
+            assert got is not None
+            cid = got.id
+        finally:
+            db.close()
+    finally:
+        craw._fetch = orig_fetch
+        craw._process_url = orig_process
+    d2 = SessionLocal()
+    try:
+        for l in d2.query(Lead).filter(Lead.company_id == cid).all():
+            d2.delete(l)
+        # Contacts too: orphan rows keep recycled company_ids alive and
+        # poison later saves' contact sets (flipped an EXCLUDED assert).
+        d2.query(Contact).filter(Contact.company_id == cid).delete()
+        d2.query(Company).filter(Company.id == cid).delete()
+        d2.query(Company).filter(Company.name == "Poison Co").delete()
+        d2.query(CrawlJob).filter(CrawlJob.id == jid).delete()
+        d2.commit()
+    finally:
+        d2.close()
+
+
 def test_save_company_without_contacts_excluded():
     uid, sid = _owner()
     html = "<html><head><title>Ghost Ltd</title></head><body>" + ("word " * 200) + "</body></html>"
