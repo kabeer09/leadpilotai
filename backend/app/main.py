@@ -32,6 +32,28 @@ app.include_router(api_google.router)
 def _startup():
     for w in startup_warnings():
         logger.warning(f"CONFIG: {w}")
+    # A fresh process owns no crawl threads: any CRAWLING row is stale
+    # (crash/restart mid-run). Saved companies are intact (incremental
+    # saves); FAILED unlocks Retry with an idempotent resume.
+    try:
+        from app.database import SessionLocal
+        from app.models import CrawlJob
+        from datetime import datetime
+        db = SessionLocal()
+        try:
+            stale = db.query(CrawlJob).filter(
+                CrawlJob.status == "CRAWLING").all()
+            for job in stale:
+                job.status = "FAILED"
+                job.finished_at = datetime.utcnow()
+                job.errors = ((job.errors or "") + "\nbackend restarted mid-run").strip()[:2000]
+            if stale:
+                db.commit()
+                logger.warning(f"Recovered {len(stale)} stale crawl(s) as FAILED")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"Stale-crawl recovery skipped: {e}")
 
 
 @app.get("/")

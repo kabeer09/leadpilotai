@@ -36,6 +36,48 @@ JUNK_EMAIL_DOMAINS = ("example.com", "example.org", "test.com", ".png", ".jpg")
 _cancel_flags: dict[int, threading.Event] = {}
 _threads: dict[int, threading.Thread] = {}
 
+
+def db_commit_retry(db, tries: int = 5) -> None:
+    """Commit with backoff on SQLite lock contention (parallel workers).
+
+    Without this, three committing sessions pile up on one SQLite file and
+    the losers raise OperationalError after 30s instead of waiting their turn.
+    """
+    import time as _t
+    from sqlalchemy.orm import Session
+    delay = 0.5
+    for attempt in range(tries):
+        try:
+            Session.commit(db)  # unbound call: bypasses our own wrapper
+            return
+        except Exception as e:
+            if "locked" not in str(e).lower() or attempt == tries - 1:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                raise
+            # BUSY: transaction still alive, wait and retry WITHOUT rollback
+            _t.sleep(delay)
+            delay = min(delay * 2, 8.0)
+
+
+def job_progress(db, job, shared: dict, force: bool = False) -> None:
+    """Write live counters, throttled: the job row is the hottest lock in
+    the system (every worker touches it), so refresh at most every 15s."""
+    import time as _t
+    now = _t.monotonic()
+    lock = shared["lock"]
+    with lock:
+        last = shared.get("progress_at", 0.0)
+        if not force and now - last < 15.0:
+            return
+        shared["progress_at"] = now
+        job.pages_visited = shared["pages"]
+        job.companies_found = shared["companies"]
+        job.contacts_found = shared["contacts"]
+    db_commit_retry(db)
+
 # One headless browser per worker thread (renders run in parallel).
 # Small containers should set CRAWL_WORKERS=1 to stay light.
 _thread_state = threading.local()
@@ -514,7 +556,7 @@ def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
         db.add(Lead(user_id=user_id, company_id=company.id,
                     contact_id=primary.id if primary else None,
                     status="NEW", score=score))
-    db.commit()
+    db_commit_retry(db)
     return company
 
 
@@ -691,7 +733,7 @@ def _enrich_from_official_site(db, user_id: int, company: Company,
             db.add(CrawlEvent(
                 user_id=user_id, job_id=job_id, url=url, status="error",
                 detail=f"[S3] {err}"[:500]))
-            db.commit()
+            db_commit_retry(db)
         data = extract_page(url, html) if html and not err else None
         thin = data is not None and not data["emails"] and not data["phones"]
         if (data is None or (thin and _looks_like_js_shell(html, data))) \
@@ -707,7 +749,7 @@ def _enrich_from_official_site(db, user_id: int, company: Company,
                 detail=(f"[S3] emails={len(data['emails'])} "
                         f"phones={len(data['phones'])} "
                         f"page={_page_type(url)}")[:500]))
-            db.commit()
+            db_commit_retry(db)
         return data
 
     home = _one(site_url)
@@ -768,7 +810,7 @@ def _enrich_from_official_site(db, user_id: int, company: Company,
             company.lifecycle = "active"
         company.last_verified = datetime.utcnow()
     apply_contact_validation(db, company)
-    db.commit()
+    db_commit_retry(db)
     return added, pages_used
 
 
@@ -789,7 +831,7 @@ def _process_url(db, client, job, canon: str, depth: int,
         db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
                           url=canon, status="skipped",
                           detail="directory mode — not a profile page"))
-        db.commit()
+        db_commit_retry(db)
         return
     existing0 = _find_company(db, job.user_id, canon, host0)
     if existing0 is not None and company_is_complete(db, existing0):
@@ -797,24 +839,24 @@ def _process_url(db, client, job, canon: str, depth: int,
                           url=canon, status="skipped",
                           detail="already complete — not re-crawled "
                                  f"(company #{existing0.id})"))
-        db.commit()
+        db_commit_retry(db)
         return
     with lock:
         if shared["pages"] >= job.max_pages or shared["cancel"].is_set():
             return
         shared["pages"] += 1
-        job.pages_visited = shared["pages"]
+    job_progress(db, job, shared)
     if SKIP_PATH_RE.search(urlparse(canon).path or ""):
         db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
                           url=canon, status="skipped",
                           detail="non-entity page (login/line/etc.)"))
-        db.commit()
+        db_commit_retry(db)
         return
     if depth == 0 and not _robots_allowed(base, canon):
         db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
                           url=canon, status="blocked",
                           detail="robots.txt disallow"))
-        db.commit()
+        db_commit_retry(db)
         return
     html, err = _fetch(client, canon)
     if err:
@@ -822,7 +864,7 @@ def _process_url(db, client, job, canon: str, depth: int,
                           url=canon, status="error", detail=err[:500]))
         with lock:
             shared["errors"].append(f"{canon}: {err}"[:200])
-        db.commit()
+        db_commit_retry(db)
         return
     data = extract_page(canon, html or "")
     via = "static"
@@ -886,7 +928,7 @@ def _process_url(db, client, job, canon: str, depth: int,
         db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
                           url=canon, status="blocked",
                           detail="bot-check/denied page — skipped save"))
-        db.commit()
+        db_commit_retry(db)
         time.sleep(PAGE_DELAY)
         return
     detail = (f"emails={len(data['emails'])} phones={len(data['phones'])} "
@@ -911,7 +953,7 @@ def _process_url(db, client, job, canon: str, depth: int,
             detail += " dropped: no contacts and no official website"
             db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
                               url=canon, status="skipped", detail=detail[:500]))
-            db.commit()
+            db_commit_retry(db)
             time.sleep(PAGE_DELAY)
             return
         comp = _save_company(db, job.user_id, job.source_id,
@@ -957,11 +999,7 @@ def _process_url(db, client, job, canon: str, depth: int,
                             and clean not in shared["seen"]):
                         shared["seen"].add(clean)
                         shared["queue"].put((clean, depth + 1))
-    with lock:
-        job.companies_found = shared["companies"]
-        job.contacts_found = shared["contacts"]
-        job.pages_visited = shared["pages"]
-    db.commit()
+    job_progress(db, job, shared)
     time.sleep(PAGE_DELAY)
 
 
@@ -1069,7 +1107,7 @@ def _ingest_adapter_records(db, job, records: list[dict],
     job.companies_found = shared["companies"]
     job.contacts_found = shared["contacts"]
     job.pages_visited = shared["pages"]
-    db.commit()
+    db_commit_retry(db)
     logger.info(f"Adapter ingest job {job.id}: {saved} companies ({enriched} enriched)")
     return saved
 
@@ -1086,7 +1124,7 @@ def run_job(job_id: int) -> None:
         max_pages, max_depth, seed_url = job.max_pages, job.max_depth, job.url
         job.status = "CRAWLING"
         job.started_at = datetime.utcnow()
-        db.commit()
+        db_commit_retry(db)
         cancel = _cancel_flags.setdefault(job_id, threading.Event())
 
         base_host = urlparse(seed_url).hostname or ""
@@ -1116,7 +1154,7 @@ def run_job(job_id: int) -> None:
                 user_id=user_id, job_id=job_id, url=seed_url, status="ok",
                 detail=f"[S1] adapter: {len(records)} records ingested, "
                        f"{n_ingested} companies saved"))
-            db.commit()
+            db_commit_retry(db)
         profiles, adapter_err = (discover_profiles(seed_url)
                                  if not records else (None, None))
         if profiles:
@@ -1129,13 +1167,13 @@ def run_job(job_id: int) -> None:
             db.add(CrawlEvent(user_id=user_id, job_id=job_id, url=seed_url,
                               status="ok",
                               detail=f"[S1] adapter: {len(profiles)} profiles queued"))
-            db.commit()
+            db_commit_retry(db)
         else:
             if adapter_err:
                 db.add(CrawlEvent(user_id=user_id, job_id=job_id, url=seed_url,
                                   status="ok",
                                   detail=f"[S1] generic crawl ({adapter_err[:100]})"))
-                db.commit()
+                db_commit_retry(db)
             shared["queue"].put((seed_url, 0))
 
         workers = max(1, settings.CRAWL_WORKERS)
@@ -1179,7 +1217,7 @@ def run_job(job_id: int) -> None:
             src = db.query(Source).filter(Source.id == job.source_id).first()
             if src:
                 src.status = job.status
-        db.commit()
+        db_commit_retry(db)
         logger.info(f"Crawl job {job_id}: {job.status} pages={pages} companies={companies}")
     except Exception as e:
         try:
@@ -1188,7 +1226,7 @@ def run_job(job_id: int) -> None:
                 job.status = "FAILED"
                 job.finished_at = datetime.utcnow()
                 job.errors = str(e)[:2000]
-                db.commit()
+                db_commit_retry(db)
         except Exception:
             pass
         logger.error(f"Crawl job {job_id} failed: {e}")

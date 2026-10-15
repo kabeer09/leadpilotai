@@ -402,6 +402,69 @@ def test_profile_fields_fill_from_selectors():
             d2.close()
 
 
+def test_commit_retry_survives_lock_storm(monkeypatch):
+    """Parallel-worker commit helper: BUSY retries without rollback loss."""
+    from app.crawler import db_commit_retry
+    from app.database import SessionLocal
+    from sqlalchemy.orm import Session
+    calls = {"n": 0, "rb": 0}
+    real_commit = Session.commit
+    real_rollback = Session.rollback
+
+    def flaky_commit(self):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise Exception("database is locked")
+        return real_commit(self)
+
+    def counting_rollback(self):
+        calls["rb"] += 1
+        return real_rollback(self)
+
+    monkeypatch.setattr(Session, "commit", flaky_commit)
+    monkeypatch.setattr(Session, "rollback", counting_rollback)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    db = SessionLocal()
+    try:
+        db_commit_retry(db, tries=5)
+    finally:
+        db.close()
+    assert calls["n"] == 3 and calls["rb"] == 0  # retried, never rolled back
+
+
+def test_progress_throttled_not_per_take(monkeypatch):
+    """Job-row writes at most every 15s (the hottest lock in the system)."""
+    import time
+    from app.crawler import job_progress
+    from app.database import SessionLocal
+    from app.models import CrawlJob
+    import threading
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    shared = {"lock": threading.Lock(), "pages": 5, "companies": 2,
+              "contacts": 9}
+    db = SessionLocal()
+    try:
+        job = CrawlJob(user_id=1, source_id=None, url="https://x.example/",
+                       max_pages=10, max_depth=0, status="CRAWLING")
+        db.add(job)
+        db.commit()
+        jid = job.id
+        job_progress(db, job, shared)
+        assert job.pages_visited == 5
+        now[0] += 5.0
+        shared.update(pages=9, companies=4, contacts=12)
+        job_progress(db, job, shared)
+        assert job.pages_visited == 5  # throttled, not written
+        now[0] += 11.0
+        job_progress(db, job, shared)
+        assert job.pages_visited == 9
+        db.query(CrawlJob).filter(CrawlJob.id == jid).delete()
+        db.commit()
+    finally:
+        db.close()
+
+
 def test_save_company_without_contacts_excluded():
     uid, sid = _owner()
     html = "<html><head><title>Ghost Ltd</title></head><body>" + ("word " * 200) + "</body></html>"
