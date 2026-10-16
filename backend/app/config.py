@@ -25,8 +25,9 @@ class Settings(BaseSettings):
     DAILY_EMAIL_LIMIT: int = 50
     MAX_CRAWL_PAGES: int = 500
     MAX_CAMPAIGN_RECIPIENTS: int = 500
-    # Parallel crawl workers (local desktop: 3; tiny containers: 1)
-    CRAWL_WORKERS: int = 3
+    # Parallel crawl workers. 2 = smooth on a typical desktop alongside
+    # the API + browsers (3+ starves SQLite/API on low-RAM machines).
+    CRAWL_WORKERS: int = 2
 
     # Google OAuth (Sign in with Google + Gmail send). Empty = button hidden.
     GOOGLE_CLIENT_ID: str = ""
