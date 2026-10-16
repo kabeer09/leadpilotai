@@ -1212,12 +1212,25 @@ def run_job(job_id: int) -> None:
         for t in threads:
             t.start()
         # Wait until budgeted pages are done, queue drains, or cancel.
+        # Progress-aware: the deadline below only applies while NOTHING
+        # finishes (a hung take must never silently end the job as
+        # "COMPLETED" — that lie once closed a 100-page job at 4 pages).
+        last_progress = time.time()
+        last_pages = 0
         while True:
             time.sleep(5)
             with shared["lock"]:
-                done = (shared["pages"] >= max_pages
-                        or shared["queue"].unfinished_tasks == 0)
+                pages_now = shared["pages"]
+                unfinished = shared["queue"].unfinished_tasks
+                done = (pages_now >= max_pages or unfinished == 0)
+                if pages_now != last_pages:
+                    last_pages, last_progress = pages_now, time.time()
             if done or cancel.is_set():
+                break
+            if time.time() - last_progress > 600:
+                with shared["lock"]:
+                    shared["errors"].append(
+                        "stalled: no page finished for 10 minutes")
                 break
         # Drain: stop workers after current items finish
         cancel_soft = cancel.is_set()
@@ -1240,7 +1253,18 @@ def run_job(job_id: int) -> None:
         with shared["lock"]:
             pages, companies = shared["pages"], shared["companies"]
             errs = list(shared["errors"])
-        job.status = "CANCELLED" if cancel.is_set() else "COMPLETED"
+            unfinished = shared["queue"].unfinished_tasks
+        if cancel.is_set():
+            final = "CANCELLED"
+        elif unfinished == 0:
+            final = "COMPLETED"
+        else:
+            # Budget hit or stall with work still queued: honest status,
+            # completed pages kept, resume by starting a new job.
+            final = "STALLED"
+            errs.append(f"stopped with {unfinished} pages unprocessed; "
+                        f"start a new crawl to resume (completed rows are kept)")
+        job.status = final
         job.pages_visited = pages
         job.companies_found = companies
         job.contacts_found = shared["contacts"]

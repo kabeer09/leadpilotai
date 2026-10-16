@@ -618,6 +618,20 @@ def test_poisoned_session_recovered_per_take():
         d2.close()
 
 
+def test_no_cpp_style_comments_in_python():
+    """Tripwire: `//` is not a Python comment (broke the crawler twice)."""
+    import re
+    import pathlib
+    bad = []
+    for path in pathlib.Path("app").rglob("*.py"):
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            code = line.split("#", 1)[0]  # ignore real comments
+            code = re.sub(r"'[^']*'|\"[^\"]*\"", "", code)  # ignore strings
+            if code.strip().startswith("//") or "//" in code:
+                bad.append(f"{path}:{i}")
+    assert not bad, f"C-style comments found: {bad}"
+
+
 def test_save_company_without_contacts_excluded():
     uid, sid = _owner()
     html = "<html><head><title>Ghost Ltd</title></head><body>" + ("word " * 200) + "</body></html>"
