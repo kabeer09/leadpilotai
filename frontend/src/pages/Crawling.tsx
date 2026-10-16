@@ -50,7 +50,7 @@ export default function Crawling() {
         <p className="mt-1 text-xs text-gray-500">Only public pages. Respects robots.txt, ~1s between requests. Localhost/private addresses are blocked.</p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="text-xs font-medium text-gray-600">Pages:</span>
-          {[25, 50, 100].map((n) => (
+          {[25, 50, 100, 500, 1000].map((n) => (
             <button
               key={n}
               onClick={() => setMaxPages(n)}
@@ -60,9 +60,9 @@ export default function Crawling() {
             </button>
           ))}
           <input
-            type="number" min={1} max={500} value={maxPages}
-            onChange={(e) => setMaxPages(Math.max(1, Math.min(500, parseInt(e.target.value) || 30)))}
-            className="input w-24 py-1.5 text-xs" title="Custom page budget (1–500)"
+            type="number" min={1} max={10000} value={maxPages}
+            onChange={(e) => setMaxPages(Math.max(1, Math.min(10000, parseInt(e.target.value) || 100)))}
+            className="input w-24 py-1.5 text-xs" title="Custom page budget (1–10000)"
           />
         </div>
         <button onClick={start} disabled={!url} className="btn-primary mt-3 text-sm"><Play className="mr-1 h-4 w-4" /> Start crawl</button>

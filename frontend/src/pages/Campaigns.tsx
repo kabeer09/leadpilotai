@@ -48,7 +48,7 @@ export default function Campaigns() {
           <input className="input" placeholder="Lead IDs, comma-separated (see Leads page)" value={form.leadIds} onChange={(e) => setForm({ ...form, leadIds: e.target.value })} />
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-medium text-gray-600">Batch size:</span>
-            {[5, 25, 50, 100, 500].map((n) => (
+            {[5, 25, 50, 100, 500, 1000, 5000].map((n) => (
               <button
                 key={n}
                 onClick={() => setBatchLimit(batchLimit === n ? null : n)}
@@ -61,7 +61,7 @@ export default function Campaigns() {
               {parsedIds.length === 0 ? 'paste lead IDs above' : batchLimit ? `first ${Math.min(batchLimit, parsedIds.length)} of ${parsedIds.length} will queue` : `all ${parsedIds.length} will queue`}
             </span>
           </div>
-          <p className="text-xs text-gray-500">Only your listed IDs queue. Skipped ones are listed with reasons. Max 50 sends/day.</p>
+          <p className="text-xs text-gray-500">Only your listed IDs queue. Skipped ones are listed with reasons.</p>
           <button onClick={create} disabled={!form.name || !form.subject || !form.body || effectiveIds.length === 0} className="btn-primary w-fit text-sm">Create draft ({effectiveIds.length})</button>
         </div>
         {msg && <p className="mt-2 text-sm text-gray-700">{msg}</p>}

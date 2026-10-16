@@ -53,7 +53,7 @@ class ProfileUpdate(BaseModel):
 class CrawlCreate(BaseModel):
     url: str = Field(max_length=2048)
     name: str | None = Field(default=None, max_length=500)
-    max_pages: int = Field(default=30, ge=1, le=500)
+    max_pages: int = Field(default=100, ge=1, le=10000)
     max_depth: int = Field(default=2, ge=0, le=3)
 
     @field_validator("url")
@@ -72,7 +72,7 @@ class CampaignCreate(BaseModel):
     body: str = Field(min_length=1)
     # Strict allow-list: ONLY these leads are ever queued. The backend
     # never adds, discovers, or tops up recipients on its own.
-    lead_ids: list[int] = Field(default_factory=list, max_length=500)
+    lead_ids: list[int] = Field(default_factory=list, max_length=5000)
     followup_enabled: bool = False
     followup_delay_hours: int = Field(default=24, ge=1, le=168)
 

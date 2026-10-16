@@ -21,10 +21,12 @@ class Settings(BaseSettings):
     RESEND_API_KEY: str = ""
     RESEND_FROM: str = ""
 
-    DAILY_CRAWL_PAGES: int = 2000
-    DAILY_EMAIL_LIMIT: int = 50
-    MAX_CRAWL_PAGES: int = 500
-    MAX_CAMPAIGN_RECIPIENTS: int = 500
+    # Usage caps effectively removed (local trial owner request).
+    # High but finite: guards against runaway jobs, not against you.
+    DAILY_CRAWL_PAGES: int = 100000
+    DAILY_EMAIL_LIMIT: int = 2000
+    MAX_CRAWL_PAGES: int = 10000
+    MAX_CAMPAIGN_RECIPIENTS: int = 5000
     # Parallel crawl workers. 2 = smooth on a typical desktop alongside
     # the API + browsers (3+ starves SQLite/API on low-RAM machines).
     CRAWL_WORKERS: int = 2
