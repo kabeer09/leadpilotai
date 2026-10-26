@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { googleConsume } from '../lib/api';
 import { useAuth } from '../auth';
+import api from '../lib/api';
 
 function saveTokens(t: { access_token: string; refresh_token: string }) {
   localStorage.setItem('lp_access', t.access_token);
@@ -33,6 +34,63 @@ export function GoogleButton({ label }: { label: string }) {
       </button>
       {error && <p className="mt-2 text-center text-xs text-red-600">{error}</p>}
       <p className="mt-1 text-center text-[11px] text-gray-400">One consent signs you in and connects Gmail sending.</p>
+    </div>
+  );
+}
+
+export function GoogleSetup({ onSaved }: { onSaved: () => void }) {
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [redirectUri, setRedirectUri] = useState('');
+  const [msg, setMsg] = useState('');
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    api.get('/auth/google/client-status').then((r) => {
+      if (!r.data.configured) setRedirectUri(r.data.redirect_uri || '');
+    }).catch(() => {});
+  }, []);
+
+  const save = async () => {
+    setMsg('');
+    try {
+      const r = await api.post('/auth/google/client', {
+        client_id: clientId, client_secret: clientSecret || undefined,
+      });
+      setRedirectUri(r.data.redirect_uri || redirectUri);
+      setMsg('Saved! Continue with Google now works.');
+      setClientId('');
+      setClientSecret('');
+      onSaved();
+    } catch (e: unknown) {
+      const d = (e as { response?: { status?: number; data?: { detail?: string } } });
+      setMsg(d.response?.data?.detail || (d.response?.status === 403
+        ? 'Already configured — sign in as admin to replace it.'
+        : 'Save failed.'));
+    }
+  };
+
+  return (
+    <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 p-3">
+      <button onClick={() => setOpen(!open)} className="text-xs font-semibold text-primary-600">
+        {open ? 'Hide setup' : 'No Google yet? Connect your own in 2 minutes'}
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2 text-xs text-gray-600">
+          <ol className="list-decimal space-y-1 pl-4">
+            <li>Open <a href="https://console.cloud.google.com" target="_blank" rel="noreferrer" className="text-primary-600">Google Cloud Console</a> → enable the <strong>Gmail API</strong>.</li>
+            <li>OAuth consent screen → External → add scope <code>gmail.send</code> → add your Gmail under <strong>Test users</strong>.</li>
+            <li>Credentials → Create <strong>OAuth client ID</strong> (Web) → redirect URI — copy exactly:
+              <code className="mt-1 block break-all rounded bg-white p-1 text-[11px]">{redirectUri || '(loading…)'}</code>
+            </li>
+            <li>Paste the Client ID + Secret below and save. One consent then signs users in and connects Gmail sending.</li>
+          </ol>
+          <input className="input text-xs" placeholder="Client ID (…apps.googleusercontent.com)" value={clientId} onChange={(e) => setClientId(e.target.value)} />
+          <input className="input text-xs" type="password" placeholder="Client secret" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} />
+          <button onClick={save} disabled={!clientId || !clientSecret} className="btn-primary w-full text-xs">Save Google client</button>
+          {msg && <p className="text-xs text-gray-700">{msg}</p>}
+        </div>
+      )}
     </div>
   );
 }

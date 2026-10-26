@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../auth';
 import api, { health, listSuppressions, gmailStatus } from '../lib/api';
+import { GoogleSetup } from './GoogleAuth';
 
 export default function Settings() {
   const { user, refresh } = useAuth();
@@ -28,16 +29,12 @@ export default function Settings() {
         <h2 className="font-semibold">Account</h2>
         <dl className="mt-2 space-y-1 text-sm">
           <div><dt className="inline text-gray-500">Email: </dt><dd className="inline font-medium">{user?.email}</dd></div>
-          <div><dt className="inline text-gray-500">Verified: </dt><dd className="inline">{user?.email_verified ? 'Yes — live sending unlocked' : 'No — verify to unlock live sending (dry-run still works)'}</dd></div>
+          <div><dt className="inline text-gray-500">Verified: </dt><dd className="inline">{user?.email_verified ? 'Yes - live sending unlocked' : 'No - verify to unlock live sending (dry-run still works)'}</dd></div>
           <div><dt className="inline text-gray-500">Role: </dt><dd className="inline">{user?.is_admin ? 'Admin (first account)' : 'Member'}</dd></div>
           <div><dt className="inline text-gray-500">WhatsApp: </dt><dd className="inline font-medium">{user?.whatsapp_number || 'Not set'}</dd></div>
         </dl>
         <div className="mt-3 flex gap-2">
-          <input
-            className="input flex-1 py-1.5 text-sm"
-            placeholder="+918218251238"
-            id="wa-number"
-          />
+          <input className="input flex-1 py-1.5 text-sm" placeholder="+918218251238" id="wa-number" />
           <button
             className="btn-secondary text-sm"
             onClick={async () => {
@@ -54,16 +51,21 @@ export default function Settings() {
       <div className="card">
         <h2 className="font-semibold">Email provider (server-side)</h2>
         <p className="mt-1 text-sm text-gray-600">
-          Current: <strong>{sys?.email_provider || '…'}</strong> — {sys?.provider_configured ? 'ready' : 'not fully configured'}.
-          Provider credentials live only in the server <code>.env</code> (<code>EMAIL_PROVIDER</code> = dryrun|smtp|resend),
-          never in the browser. See README → provider setup.
+          Current: <strong>{sys?.email_provider || '...'}</strong> - {sys?.provider_configured ? 'ready' : 'not fully configured'}.
+          Provider credentials live only in the server .env (EMAIL_PROVIDER = dryrun|smtp|resend),
+          never in the browser. See README for provider setup.
         </p>
         <p className="mt-2 text-sm">
           Gmail: {gmail ? (gmail.connected
-            ? <span className="badge bg-green-100 text-green-800">connected — campaigns can send via your Gmail</span>
-            : <span className="badge bg-yellow-100 text-yellow-800">not connected — use “Continue with Google” on the login page</span>)
-            : 'checking…'}
+            ? <span className="badge bg-green-100 text-green-800">connected - campaigns can send via your Gmail</span>
+            : <span className="badge bg-yellow-100 text-yellow-800">not connected - use "Continue with Google" on the login page</span>)
+            : 'checking...'}
         </p>
+        {!gmail?.connected && (
+          <div className="mt-3">
+            <GoogleSetup onSaved={() => { gmailStatus().then(setGmail).catch(() => {}); }} />
+          </div>
+        )}
         {sys && sys.warnings.length > 0 && (
           <ul className="mt-2 space-y-1 text-xs text-yellow-700">
             {sys.warnings.map((w, i) => <li key={i}>• {w}</li>)}
@@ -96,7 +98,7 @@ export default function Settings() {
       )}
       {user?.is_admin && (
         <div className="card">
-          <h2 className="font-semibold">Admin — accounts ({users.length})</h2>
+          <h2 className="font-semibold">Admin - accounts ({users.length})</h2>
           <ul className="mt-2 space-y-1 text-sm">
             {users.map((u) => (
               <li key={u.id} className="flex items-center gap-2">
