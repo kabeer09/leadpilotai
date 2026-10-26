@@ -1,9 +1,8 @@
-app = "leadpilotai"
+app = "leadpilot-nli"
 primary_region = "ams"
 
 [build]
   dockerfile = "Dockerfile"
-  context = "backend"
 
 [env]
   PORT = "8000"
@@ -17,7 +16,7 @@ primary_region = "ams"
   min_machines_running = 0
 
 [[vm]]
-  memory = "512mb"
+  memory = "1gb"
   cpu_kind = "shared"
   cpus = 1
-  memory_mb = 512
+  memory_mb = 1024

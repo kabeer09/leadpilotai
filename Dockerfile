@@ -1,4 +1,3 @@
-# LeadPilot AI — Backend only (frontend deployed separately on Vercel)
 FROM python:3.12-slim
 
 WORKDIR /srv
@@ -11,13 +10,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgbm1 libasound2 libpango-1.0-0 libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
  && python -m playwright install --with-deps chromium
 
-COPY alembic.ini .
-COPY alembic/ alembic/
-COPY app/ app/
+COPY backend/alembic.ini .
+COPY backend/alembic/ alembic/
+COPY backend/app/ app/
 
 ENV PORT=8000
 CMD ["sh", "-c", "python -m alembic upgrade head && python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
