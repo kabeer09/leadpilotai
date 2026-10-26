@@ -3,7 +3,7 @@ services:
   - type: web
     name: leadpilot-trial-api
     runtime: docker
-    repo: https://github.com/YOUR-USERNAME/leadpilot-public-trial.git
+    repo: https://github.com/kabeer09/leadpilotai.git
     rootDir: backend
     dockerfilePath: ./Dockerfile
     plan: free
@@ -25,7 +25,7 @@ services:
   - type: web
     name: leadpilot-trial-web
     runtime: static
-    repo: https://github.com/YOUR-USERNAME/leadpilot-public-trial.git
+    repo: https://github.com/kabeer09/leadpilotai.git
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: dist
