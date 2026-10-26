@@ -49,5 +49,7 @@ COPY --from=backend /root/.cache/ms-playwright /root/.cache/ms-playwright
 # Copy frontend build to static/
 COPY --from=frontend /app/dist /srv/static
 
+RUN mkdir -p /data
 ENV PORT=8000
+ENV DATABASE_URL=sqlite:////data/trial.db
 CMD ["sh", "-c", "python -m alembic upgrade head && python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
