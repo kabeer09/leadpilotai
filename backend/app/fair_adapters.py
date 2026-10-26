@@ -13,6 +13,7 @@ import string
 import time
 
 import httpx
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -346,10 +347,75 @@ def _highpoint_profiles() -> tuple[list[str], str | None]:
         return None, f"High Point adapter failed: {str(e)[:150]}"
 
 
+def _hometex_profiles() -> tuple[list[str], str | None]:
+    """Hometex (Turkey): exhibitor list page with links to individual profiles."""
+    base = "https://hometex.com.tr"
+    try:
+        with httpx.Client(timeout=25.0,
+                          headers={"User-Agent": UA}) as client:
+            r = client.get(f"{base}/en/2026-exhibitor-list")
+            if r.status_code != 200:
+                return None, f"exhibitor list HTTP {r.status_code}"
+            seen: set[str] = set()
+            for m in re.finditer(r'href="(/en/[a-z0-9-]+-\d+)"', r.text):
+                seen.add(base + m.group(1))
+            urls = sorted(seen)
+            return (urls, None) if urls else (None, "no profile links found")
+    except Exception as e:
+        return None, f"Hometex adapter failed: {str(e)[:150]}"
+
+
+def _springfair_profiles() -> tuple[list[str], str | None]:
+    """Spring Fair (UK): exhibitor listing page."""
+    base = "https://www.springfair.com"
+    try:
+        with httpx.Client(timeout=25.0,
+                          headers={"User-Agent": UA}) as client:
+            r = client.get(f"{base}/exhibitors")
+            if r.status_code != 200:
+                return None, f"exhibitor list HTTP {r.status_code}"
+            seen: set[str] = set()
+            for m in re.finditer(r'href="(/?exhibitors/[a-z0-9-]+)"', r.text):
+                path = m.group(1)
+                if not path.startswith('/'):
+                    path = '/' + path
+                seen.add(base + path)
+            urls = sorted(seen)
+            return (urls, None) if urls else (None, "no profile links found")
+    except Exception as e:
+        return None, f"Spring Fair adapter failed: {str(e)[:150]}"
+
+
+def _topdrawer_profiles() -> tuple[list[str], str | None]:
+    """Top Drawer (UK): A-Z brands page with exhibitor modal links."""
+    base = "https://www.topdrawer.co.uk"
+    try:
+        with httpx.Client(timeout=25.0,
+                          headers={"User-Agent": UA}) as client:
+            r = client.get(f"{base}/atozbrands?&sortby=title%20asc&searchgroup=2032BE9D-exhibitors")
+            if r.status_code != 200:
+                return None, f"brands page HTTP {r.status_code}"
+            seen: set[str] = set()
+            for m in re.finditer(r"openRemoteModal\('([^']+)'", r.text):
+                path = m.group(1).strip()
+                if not path.startswith("exhibitors/"):
+                    continue
+                if not path.startswith("/"):
+                    path = "/" + path
+                seen.add(base + path)
+            urls = sorted(seen)
+            return (urls, None) if urls else (None, "no exhibitor links found")
+    except Exception as e:
+        return None, f"Top Drawer adapter failed: {str(e)[:150]}"
+
+
 URL_ADAPTERS: list[tuple[str, callable]] = [
     ("lasvegasmarket.com", _lasvegas_profiles),
     ("atlantamarket.com", _atlanta_profiles),
     ("highpointmarket.org", _highpoint_profiles),
+    ("hometex.com.tr", _hometex_profiles),
+    ("springfair.com", _springfair_profiles),
+    ("topdrawer.co.uk", _topdrawer_profiles),
 ]
 
 

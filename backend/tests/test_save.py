@@ -555,7 +555,8 @@ def test_poisoned_session_recovered_per_take():
     poisoned = {"done": False}
     real_process = craw._process_url
 
-    def flaky_process(db_, client_, job_, canon, depth, base, host, shared):
+    def flaky_process(db_, client_, job_, canon, depth, base, host, shared,
+                      force_recrawl=False):
         if not poisoned["done"]:
             poisoned["done"] = True
             db_.add(Company(user_id=uid, source_id=sid, name="Poison Co"))

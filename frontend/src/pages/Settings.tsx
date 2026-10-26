@@ -30,7 +30,26 @@ export default function Settings() {
           <div><dt className="inline text-gray-500">Email: </dt><dd className="inline font-medium">{user?.email}</dd></div>
           <div><dt className="inline text-gray-500">Verified: </dt><dd className="inline">{user?.email_verified ? 'Yes — live sending unlocked' : 'No — verify to unlock live sending (dry-run still works)'}</dd></div>
           <div><dt className="inline text-gray-500">Role: </dt><dd className="inline">{user?.is_admin ? 'Admin (first account)' : 'Member'}</dd></div>
+          <div><dt className="inline text-gray-500">WhatsApp: </dt><dd className="inline font-medium">{user?.whatsapp_number || 'Not set'}</dd></div>
         </dl>
+        <div className="mt-3 flex gap-2">
+          <input
+            className="input flex-1 py-1.5 text-sm"
+            placeholder="+918218251238"
+            id="wa-number"
+          />
+          <button
+            className="btn-secondary text-sm"
+            onClick={async () => {
+              const el = document.getElementById('wa-number') as HTMLInputElement;
+              if (!el.value) return;
+              await api.patch('/auth/me', { whatsapp_number: el.value });
+              refresh();
+            }}
+          >
+            Save WhatsApp
+          </button>
+        </div>
       </div>
       <div className="card">
         <h2 className="font-semibold">Email provider (server-side)</h2>

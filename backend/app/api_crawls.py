@@ -41,7 +41,7 @@ def create_crawl(payload: CrawlCreate, db: Session = Depends(get_db),
     db.refresh(job)
     audit(db, user.id, "crawl_start", "crawl_job", job.id, payload.url[:200])
     db.commit()
-    crawler.start_job(job.id)
+    crawler.start_job(job.id, force_recrawl=payload.force_recrawl)
     return {"id": job.id, "status": job.status, "url": job.url}
 
 

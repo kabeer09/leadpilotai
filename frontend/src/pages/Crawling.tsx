@@ -10,6 +10,7 @@ interface Job {
 export default function Crawling() {
   const [url, setUrl] = useState('');
   const [maxPages, setMaxPages] = useState(30);
+  const [forceRecrawl, setForceRecrawl] = useState(false);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
   const [msg, setMsg] = useState('');
@@ -28,7 +29,7 @@ export default function Crawling() {
   const start = async () => {
     setMsg('');
     try {
-      const j = await createCrawl({ url, max_pages: maxPages });
+      const j = await createCrawl({ url, max_pages: maxPages, force_recrawl: forceRecrawl });
       setMsg(`Crawl #${j.id} started (${maxPages} pages). Already-complete companies are skipped, not re-crawled.`);
       setUrl('');
       load();
@@ -65,6 +66,10 @@ export default function Crawling() {
             className="input w-24 py-1.5 text-xs" title="Custom page budget (1–10000)"
           />
         </div>
+        <label className="mt-2 flex items-center gap-2 text-sm text-gray-600">
+          <input type="checkbox" checked={forceRecrawl} onChange={(e) => setForceRecrawl(e.target.checked)} className="rounded" />
+          Force re-crawl (re-visit already-complete companies for fresh details)
+        </label>
         <button onClick={start} disabled={!url} className="btn-primary mt-3 text-sm"><Play className="mr-1 h-4 w-4" /> Start crawl</button>
         {msg && <p className="mt-2 text-sm text-gray-700">{msg}</p>}
       </div>

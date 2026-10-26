@@ -98,6 +98,13 @@ def update_profile(payload: ProfileUpdate, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
     if payload.name is not None:
         user.name = payload.name.strip() or None
+    if payload.whatsapp_number is not None:
+        import re
+        phone = re.sub(r"\D", "", payload.whatsapp_number)
+        if len(phone) < 8 or len(phone) > 15:
+            raise HTTPException(status_code=422, detail="Invalid WhatsApp number")
+        user.whatsapp_number = payload.whatsapp_number
+        user.whatsapp_verified = False
     audit(db, user.id, "profile_update", "user", user.id)
     db.commit()
     db.refresh(user)

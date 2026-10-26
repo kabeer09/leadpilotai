@@ -7,6 +7,8 @@ interface User {
   name: string | null;
   is_admin: boolean;
   email_verified: boolean;
+  whatsapp_number?: string | null;
+  whatsapp_verified?: boolean;
 }
 
 const AuthCtx = createContext<{ user: User | null; loading: boolean; refresh: () => Promise<void>; signOut: () => Promise<void> }>({

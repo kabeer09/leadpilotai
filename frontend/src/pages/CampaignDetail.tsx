@@ -76,7 +76,14 @@ export default function CampaignDetail() {
               <p className="whitespace-pre-wrap text-xs text-gray-600">{r.body.slice(0, 400)}{r.body.length > 400 ? '…' : ''}</p>
             </div>
           ))}
-          {pv.recipients.length === 0 && <p className="text-sm italic text-gray-400">No eligible recipients (suppressed/contacted addresses are excluded).</p>}
+          {pv.recipients.length === 0 && (
+            <div className="space-y-2">
+              <p className="text-sm italic text-gray-400">No eligible recipients (all leads were already contacted or suppressed).</p>
+              {pv.status === 'DRAFT' && (
+                <p className="text-sm text-gray-600">Go to the <a href="/campaigns" className="text-primary-600 underline">Campaigns page</a> and create a new campaign — it will automatically include already-contacted leads.</p>
+              )}
+            </div>
+          )}
         </div>
       </div>
       {pv.status === 'DRAFT' && pv.recipients.length > 0 && (

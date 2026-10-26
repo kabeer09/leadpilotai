@@ -219,8 +219,6 @@ def send_campaign(db, user, campaign: Campaign, allow_resend: bool = False) -> d
         country = lead.company.country if lead.company else ""
         subject = personalize(campaign.subject, company_name, country, r.email)
         body = personalize(campaign.body, company_name, country, r.email)
-        body += (f"\n\n---\nYou received this because {company_name} listed "
-                 f"{r.email} publicly. Unsubscribe: {settings.FRONTEND_URL}/unsubscribe?email={r.email}")
         result = provider.send(r.email, subject, body)
         msg = EmailMessage(
             user_id=user.id, campaign_id=campaign.id, lead_id=lead.id,

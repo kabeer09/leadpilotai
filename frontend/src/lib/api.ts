@@ -87,6 +87,32 @@ export const listFollowups = () => api.get('/followups').then((r) => r.data);
 export const processFollowups = () => api.post('/followups/process').then((r) => r.data);
 export const listSuppressions = () => api.get('/suppressions').then((r) => r.data);
 
+// WhatsApp
+export const whatsappLeads = () => api.get('/whatsapp/leads').then((r) => r.data);
+export const whatsappSend = (d: object) => api.post('/whatsapp/send', d).then((r) => r.data);
+
+// Sources & Import
+export const listSources = () => api.get('/sources').then((r) => r.data);
+export const importTemplate = () => api.get('/import/template').then((r) => r.data);
+export const importCSV = (file: File, sourceName?: string) => {
+  const fd = new FormData();
+  fd.append('file', file);
+  return api.post('/import/csv' + (sourceName ? '?source_name=' + encodeURIComponent(sourceName) : ''), fd, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  }).then((r) => r.data);
+};
+export const importManualUrl = (d: object) => api.post('/import/manual-url', d).then((r) => r.data);
+
+// Research
+export const researchCompany = (id: number) => api.get('/research/company/' + id).then((r) => r.data);
+export const generateDraft = (id: number) => api.post('/research/draft/' + id, {}).then((r) => r.data);
+export const listQualified = (minScore = 40) => api.get('/research/qualified', { params: { min_score: minScore } }).then((r) => r.data);
+export const runResearch = (d: object) => api.post('/research/run', d).then((r) => r.data);
+
+// Enrichment
+export const enrichWebsite = (id: number) => api.post('/enrich/website/' + id, {}).then((r) => r.data);
+export const enrichBatch = (d: object) => api.post('/enrich/batch', d).then((r) => r.data);
+
 // Analytics + health
 export const overview = (days = 30) => api.get('/analytics/overview', { params: { days } }).then((r) => r.data);
 export const trends = (days = 30) => api.get('/analytics/trends', { params: { days } }).then((r) => r.data);

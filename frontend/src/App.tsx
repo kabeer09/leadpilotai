@@ -12,10 +12,13 @@ import LeadDetail from './pages/LeadDetail';
 import Crawling from './pages/Crawling';
 import Campaigns from './pages/Campaigns';
 import CampaignDetail from './pages/CampaignDetail';
+import WhatsApp from './pages/WhatsApp';
 import EmailActivity from './pages/EmailActivity';
 import Followups from './pages/Followups';
 import Analytics from './pages/Analytics';
 import Settings from './pages/Settings';
+import Sources from './pages/Sources';
+import Research from './pages/Research';
 import Unsubscribe from './pages/Unsubscribe';
 import { GoogleCallback } from './pages/GoogleAuth';
 
@@ -45,10 +48,13 @@ export default function App() {
         <Route path="crawling" element={<Crawling />} />
         <Route path="campaigns" element={<Campaigns />} />
         <Route path="campaigns/:id" element={<CampaignDetail />} />
+        <Route path="whatsapp" element={<WhatsApp />} />
         <Route path="activity" element={<EmailActivity />} />
         <Route path="followups" element={<Followups />} />
         <Route path="analytics" element={<Analytics />} />
         <Route path="settings" element={<Settings />} />
+        <Route path="sources" element={<Sources />} />
+        <Route path="research" element={<Research />} />
       </Route>
       <Route path="*" element={<Landing />} />
     </Routes>

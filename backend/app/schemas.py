@@ -31,6 +31,8 @@ class UserOut(BaseModel):
     name: str | None
     is_admin: bool
     email_verified: bool
+    whatsapp_number: str | None = None
+    whatsapp_verified: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -47,6 +49,7 @@ class PasswordResetConfirm(BaseModel):
 
 class ProfileUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=255)
+    whatsapp_number: str | None = Field(default=None, max_length=20)
 
 
 # ---- Crawls ----
@@ -55,6 +58,8 @@ class CrawlCreate(BaseModel):
     name: str | None = Field(default=None, max_length=500)
     max_pages: int = Field(default=100, ge=1, le=10000)
     max_depth: int = Field(default=2, ge=0, le=3)
+    force_recrawl: bool = False
+    force_recrawl: bool = False
 
     @field_validator("url")
     @classmethod
@@ -70,9 +75,10 @@ class CampaignCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     subject: str = Field(min_length=1, max_length=500)
     body: str = Field(min_length=1)
-    # Strict allow-list: ONLY these leads are ever queued. The backend
-    # never adds, discovers, or tops up recipients on its own.
+    # Empty = ALL leads with email. Non-empty = only those IDs.
     lead_ids: list[int] = Field(default_factory=list, max_length=5000)
+    batch_limit: int | None = Field(default=None, ge=1, le=5000)
+    allow_resend: bool = False
     followup_enabled: bool = False
     followup_delay_hours: int = Field(default=24, ge=1, le=168)
 

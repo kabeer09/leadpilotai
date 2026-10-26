@@ -16,8 +16,15 @@ router = APIRouter(prefix="/api", tags=["email"])
 
 
 def _build_recipients(db: Session, user: User, campaign: Campaign,
-                      lead_ids: list[int], allow_resend: bool = False) -> dict:
+                      lead_ids: list[int], allow_resend: bool = False,
+                      batch_limit: int | None = None) -> dict:
     added = skipped_suppressed = skipped_contacted = skipped_noemail = 0
+    if not lead_ids:
+        # No IDs listed = ALL leads with email (batch limit applied after)
+        lead_ids = [l.id for l in db.query(Lead.id).filter(
+            Lead.user_id == user.id).order_by(Lead.id).all()]
+        if batch_limit:
+            lead_ids = lead_ids[:batch_limit]
     for lid in dict.fromkeys(lead_ids):
         lead = db.query(Lead).filter(
             Lead.id == lid, Lead.user_id == user.id).first()
@@ -73,7 +80,9 @@ def create_campaign(payload: CampaignCreate, db: Session = Depends(get_db),
     db.add(c)
     db.commit()
     db.refresh(c)
-    info = _build_recipients(db, user, c, payload.lead_ids)
+    info = _build_recipients(db, user, c, payload.lead_ids,
+                             allow_resend=payload.allow_resend,
+                             batch_limit=payload.batch_limit)
     audit(db, user.id, "campaign_create", "campaign", c.id, payload.name[:200])
     db.commit()
     return {"id": c.id, "status": c.status, **info}
@@ -102,12 +111,15 @@ def campaign_preview(campaign_id: int, db: Session = Depends(get_db),
             "body": personalize(c.body, company.name if company else "",
                                 company.country if company else "", r.email),
         })
+    from app.emailing import get_provider_for_user
+    provider = get_provider_for_user(user)
     return {"id": c.id, "name": c.name, "status": c.status,
-            "provider": get_provider().name,
+            "provider": provider.name,
             "provider_connected": (
                 True if settings.EMAIL_PROVIDER == "dryrun"
                 else bool((settings.SMTP_HOST and settings.SMTP_FROM)
-                          or (settings.RESEND_API_KEY and settings.RESEND_FROM))),
+                          or (settings.RESEND_API_KEY and settings.RESEND_FROM))
+                or (settings.EMAIL_PROVIDER == "gmail" and bool(user.gmail_refresh_token))),
             "recipient_count": len(rows), "recipients": rows,
             "daily_quota": {"used": emails_sent_today(db, user.id),
                             "limit": settings.DAILY_EMAIL_LIMIT}}
@@ -154,8 +166,10 @@ def campaign_send(campaign_id: int, payload: CampaignSend,
         Campaign.id == campaign_id, Campaign.user_id == user.id).first()
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    if c.status not in ("DRAFT",):
+    if c.status not in ("DRAFT", "SENDING"):
         raise HTTPException(status_code=409, detail=f"Campaign already {c.status}")
+    if settings.EMAIL_PROVIDER != "dryrun" and not user.email_verified:
+        raise HTTPException(status_code=400, detail="Verify your email address before live sending")
     pending = db.query(CampaignRecipient).filter(
         CampaignRecipient.campaign_id == c.id,
         CampaignRecipient.status == "PENDING").count()
@@ -258,10 +272,15 @@ def list_followups(db: Session = Depends(get_db), user: User = Depends(get_curre
         lead = db.query(Lead).filter(Lead.id == f.lead_id).first()
         company = db.query(Company).filter(
             Company.id == lead.company_id).first() if lead else None
+        msg = db.query(EmailMessage).filter(
+            EmailMessage.id == f.message_id).first() if f.message_id else None
         out.append({"id": f.id, "lead_id": f.lead_id,
                     "company": company.name if company else None,
                     "scheduled_at": f.scheduled_at, "status": f.status,
-                    "skip_reason": f.skip_reason, "sent_at": f.sent_at})
+                    "skip_reason": f.skip_reason, "sent_at": f.sent_at,
+                    "to_email": msg.to_email if msg else None,
+                    "subject": msg.subject if msg else None,
+                    "body": msg.body if msg else None})
     return out
 
 

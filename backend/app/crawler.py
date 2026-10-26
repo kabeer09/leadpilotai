@@ -297,6 +297,11 @@ def extract_page(url: str, html: str) -> dict:
     h1tag = soup.find("h1")
     if h1tag:
         h1 = h1tag.get_text(" ", strip=True)[:500]
+    # Extract website from text (Hometex "Web" field, etc.)
+    web_text = ""
+    m = re.search(r'(?:Web|Website|URL)\s*[:\s]+([^\s<]{4,})', text, re.I)
+    if m:
+        web_text = m.group(1).strip().rstrip("/")
     desc = ""
     md = soup.find("meta", attrs={"name": "description"})
     if md and md.get("content"):
@@ -334,6 +339,27 @@ def extract_page(url: str, html: str) -> dict:
         h = (urlparse(full).hostname or "").lower()
         if h and h != (urlparse(url).hostname or "").lower():
             external.append((h, full, anchor))
+    # Hometex: extract website from "Web" text field (not a link)
+    web_field = ""
+    for tag in soup.find_all(string=re.compile(r'Web', re.I)):
+        parent = tag.parent
+        if parent:
+            nxt = parent.find_next_sibling()
+            if nxt:
+                web_field = nxt.get_text(strip=True)
+                break
+    if not web_field:
+        # Try regex on raw text
+        m = re.search(r'Web\s+([^\s<]{4,})', text)
+        if m:
+            web_field = m.group(1).strip()
+    if web_field and "http" not in web_field.lower() and "." in web_field:
+        if not web_field.startswith("http"):
+            web_field = "https://" + web_field.rstrip("/")
+        links.append((web_field, "website"))
+        h = (urlparse(web_field).hostname or "").lower()
+        if h:
+            external.append((h, web_field, "website"))
     social = ("facebook.", "linkedin.", "twitter.", "instagram.", "youtube.",
               "pinterest.", "tiktok.", "whatsapp.", "telegram.", "xing.",
               "line.me", "t.me", "wa.me")
@@ -357,6 +383,7 @@ def extract_page(url: str, html: str) -> dict:
     profile = extract_profile(soup, url)
     return {
         "title": title, "site_name": og_site, "og_title": og_title, "h1": h1,
+        "web_text": web_text,
         "description": desc,
         "emails": emails[:20], "phones": phones[:20],
         "whatsapp": sorted(set(wa_confirmed))[:10],
@@ -369,7 +396,8 @@ def extract_page(url: str, html: str) -> dict:
 
 PROFILE_PATH_RE = re.compile(
     r"/(exhibitor|exhibitors|company|companies|profile|profiles|listing|listings|"
-    r"vendor|vendors|supplier|suppliers|member|members|brand|brands)/[^/?#]+",
+    r"vendor|vendors|supplier|suppliers|member|members|brand|brands)/[^/?#]+"
+    r"|/en/[a-z0-9-]+-\d+",
     re.IGNORECASE)
 
 # Pages that are never companies and never worth following.
@@ -415,6 +443,7 @@ def _looks_like_profile_url(url: str) -> bool:
     """Is this URL itself an entity profile page (vs a section index)?"""
     if SKIP_PATH_RE.search(urlparse(url).path or ""):
         return False
+    host = (urlparse(url).hostname or "").lower()
     m = PROFILE_PATH_RE.search(urlparse(url).path or "")
     if not m:
         return False
@@ -422,6 +451,12 @@ def _looks_like_profile_url(url: str) -> bool:
     if re.search(r"\d", slug):
         return True
     low = slug.lower()
+    # Top Drawer: /exhibitors/<slug> are all profile pages
+    if "topdrawer.co.uk" in host and "/exhibitors/" in (urlparse(url).path or ""):
+        return len(slug) >= 3
+    # Hometex: /en/<slug>-<digits> are all profile pages
+    if "hometex.com.tr" in host and re.search(r"-\d+$", slug):
+        return True
     return len(slug) > 12 and not any(w in low for w in INDEX_WORDS)
 
 
@@ -455,12 +490,12 @@ def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
         return cleaned
 
     h1 = data.get("h1") or ""
-    name = (data.get("site_name")
-            or _clean(data.get("profile_name") or "")
+    name = (_clean(data.get("profile_name") or "")
             or (_clean(h1) if len(h1) <= 80 else "")
             or _clean(data.get("details_name") or "")
             or _clean(data.get("title") or "")
-            or _clean(data.get("og_title") or ""))
+            or _clean(data.get("og_title") or "")
+            or data.get("site_name"))
     # Unrendered front-end template placeholders are not company names
     # (e.g. "{lineName} shown by {exhibitorName}").
     if not name or "{" in name or "}" in name or "%s" in name:
@@ -469,13 +504,20 @@ def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
     # Identity: exact profile URL first; homepage URLs additionally match by
     # domain (so re-crawls of a homepage update one row — profiles on a
     # shared directory domain never collapse into each other).
-    existing = _find_company(db, user_id, url, host)
+    existing = _find_company(db, user_id, url, host, name,
+                            data.get("emails", []), data.get("phones", []))
     company = existing or Company(user_id=user_id, source_id=source_id, name=name[:500])
     if not existing:
         db.add(company)
         db.flush()
     if not company.website:
-        company.website = host
+        web = data.get("web_text", "")
+        if web and "." in web:
+            if not web.startswith("http"):
+                web = "https://" + web
+            company.website = web
+        else:
+            company.website = host
     # Fill-only merges: never erase crawled facts, only complete them.
     best_desc = data.get("profile_description") or data.get("description")
     if best_desc and not company.product_summary:
@@ -564,10 +606,51 @@ SITE_ANCHOR_RE = re.compile(r"visit|website|official|web site|homepage", re.IGNO
 CONTACT_PAGE_RE = re.compile(r"contact|about|team|support|impressum|kontakt|reach-us|locations", re.IGNORECASE)
 
 
-def _find_company(db, user_id: int, url: str, host: str):
-    """Find the existing row for a page (profile URL first, homepage by domain)."""
+def _find_company(db, user_id: int, url: str, host: str, name: str = None,
+                  emails: list = None, phones: list = None):
+    """Find the existing row for a page (profile URL first, then name, then
+    shared contact email/phone, then homepage by domain)."""
     existing = db.query(Company).filter(
         Company.user_id == user_id, Company.profile_url == url).first()
+    if not existing and name and len(name) >= 10:
+        # Match by exact name (only for meaningful names, not generic
+        # placeholders like "Exhibitor" that appear on many pages)
+        existing = db.query(Company).filter(
+            Company.user_id == user_id, Company.name == name).first()
+    if not existing and name and len(name) >= 10:
+        # Match by name prefix (first 2 words) to catch variants like
+        # "Kim Seybert" and "Kim Seybert Fall 2026 Catalog"
+        words = name.split()
+        if len(words) >= 2:
+            prefix = " ".join(words[:2])
+            existing = db.query(Company).filter(
+                Company.user_id == user_id,
+                Company.name.like(prefix + "%")).first()
+    if not existing and emails:
+        # Match by shared email
+        from app.models import Contact
+        for e in emails:
+            contact = db.query(Contact).filter(
+                Contact.user_id == user_id, Contact.kind == "EMAIL",
+                Contact.normalized == e).first()
+            if contact:
+                existing = db.query(Company).filter(
+                    Company.id == contact.company_id).first()
+                if existing:
+                    break
+    if not existing and phones:
+        # Match by shared phone
+        from app.models import Contact
+        for p in phones:
+            norm = re.sub(r"\D", "", p)
+            contact = db.query(Contact).filter(
+                Contact.user_id == user_id, Contact.kind == "PHONE",
+                Contact.normalized.like("%" + norm[-7:] + "%")).first()
+            if contact:
+                existing = db.query(Company).filter(
+                    Company.id == contact.company_id).first()
+                if existing:
+                    break
     if not existing:
         path = urlparse(url).path or "/"
         if path in ("", "/"):
@@ -815,7 +898,7 @@ def _enrich_from_official_site(db, user_id: int, company: Company,
 
 
 def _process_url(db, client, job, canon: str, depth: int,
-                 base: str, base_host: str, shared: dict) -> None:
+                 base: str, base_host: str, shared: dict, force_recrawl: bool = False) -> None:
     """Fetch + extract + save ONE url (worker thread). All writes tenant-scoped."""
     lock = shared["lock"]
     # Already-complete companies are never re-crawled (costs no budget).
@@ -834,12 +917,14 @@ def _process_url(db, client, job, canon: str, depth: int,
         db_commit_retry(db)
         return
     existing0 = _find_company(db, job.user_id, canon, host0)
-    if existing0 is not None and company_is_complete(db, existing0):
+    if existing0 is not None and company_is_complete(db, existing0) and not force_recrawl:
         db.add(CrawlEvent(user_id=job.user_id, job_id=job.id,
                           url=canon, status="skipped",
                           detail="already complete — not re-crawled "
                                  f"(company #{existing0.id})"))
         db_commit_retry(db)
+        with shared["lock"]:
+            shared["skipped_complete"] = shared.get("skipped_complete", 0) + 1
         return
     with lock:
         if shared["pages"] >= job.max_pages or shared["cancel"].is_set():
@@ -1050,7 +1135,8 @@ def _worker(job_id: int, user_id: int, source_id: int | None,
                 if not job:
                     return
                 _process_url(db, client, job, canon, depth,
-                             base, base_host, shared)
+                             base, base_host, shared,
+                             shared.get("force_recrawl", False))
             except Exception as e:
                 logger.warning(f"Worker error on {url}: {str(e)[:150]}")
                 # A failed flush poisons the whole session (every later take
@@ -1139,7 +1225,7 @@ def _ingest_adapter_records(db, job, records: list[dict],
     return saved
 
 
-def run_job(job_id: int) -> None:
+def run_job(job_id: int, force_recrawl: bool = False) -> None:
     """Background crawl: adapter discovery (S1) + worker pool (S2/S3)."""
     from queue import Queue, Empty
     db = SessionLocal()
@@ -1161,9 +1247,11 @@ def run_job(job_id: int) -> None:
             "queue": Queue(),
             "seen": set(),
             "pages": 0, "companies": 0, "contacts": 0,
+        "skipped_complete": 0,
             "render_budget": [max_pages],  # one render max per page, total capped
             "errors": [],
             "cancel": cancel,
+            "force_recrawl": force_recrawl,
             # directory_mode: seed was a fair listing (or adapter hit) — only
             # profile-URL pages become companies from then on.
             "directory_mode": False,
@@ -1269,6 +1357,16 @@ def run_job(job_id: int) -> None:
         job.companies_found = companies
         job.contacts_found = shared["contacts"]
         job.finished_at = datetime.utcnow()
+        # If zero pages processed because everything was already complete,
+        # add a clear explanation so the user understands (not a bug).
+        if pages == 0 and not cancel.is_set():
+            # Count from in-memory shared dict (worker threads use own sessions)
+            skipped_complete = shared.get("skipped_complete", 0)
+            if skipped_complete > 0:
+                job.errors = ("All %d profiles were already crawled and complete. "
+                              "No new pages needed. Crawl a different directory "
+                              "or increase page budget for new companies."
+                              % skipped_complete)
         job.errors = "\n".join(errs[-10:]) or None
         if job.source_id:
             src = db.query(Source).filter(Source.id == job.source_id).first()
@@ -1291,11 +1389,11 @@ def run_job(job_id: int) -> None:
         db.close()
 
 
-def start_job(job_id: int) -> bool:
+def start_job(job_id: int, force_recrawl: bool = False) -> bool:
     if job_id in _threads and _threads[job_id].is_alive():
         return False
     _cancel_flags[job_id] = threading.Event()
-    t = threading.Thread(target=run_job, args=(job_id,), daemon=True)
+    t = threading.Thread(target=run_job, args=(job_id, force_recrawl), daemon=True)
     _threads[job_id] = t
     t.start()
     return True
