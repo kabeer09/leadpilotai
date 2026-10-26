@@ -51,6 +51,13 @@ class ProfileUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=255)
     whatsapp_number: str | None = Field(default=None, max_length=20)
 
+class OTPRequest(BaseModel):
+    email: EmailStr
+
+class OTPVerify(BaseModel):
+    email: EmailStr
+    otp: str = Field(min_length=4, max_length=8)
+
 
 # ---- Crawls ----
 class CrawlCreate(BaseModel):

@@ -19,6 +19,8 @@ class User(Base):
     email_verified = Column(Boolean, default=False, nullable=False)
     whatsapp_number = Column(String(20), nullable=True)
     whatsapp_verified = Column(Boolean, default=False, nullable=False)
+    otp_code = Column(String(10), nullable=True)
+    otp_expires = Column(DateTime, nullable=True)
     verification_token = Column(String(255), nullable=True, index=True)
     reset_token = Column(String(255), nullable=True, index=True)
     reset_expires = Column(DateTime, nullable=True)
