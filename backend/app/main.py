@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings, startup_warnings
-from app import api_auth, api_health, api_crawls, api_crm, api_email, api_analytics, api_admin, api_google, api_whatsapp, api_import, api_research, api_enrich, api_otp
+from app import api_auth, api_health, api_crawls, api_crm, api_email, api_analytics, api_admin, api_google, api_whatsapp, api_import, api_research, api_enrich
 # Import research models so tables are created
 from app import models_research  # noqa: F401
 
@@ -32,7 +32,6 @@ app.include_router(api_whatsapp.router)
 app.include_router(api_import.router)
 app.include_router(api_research.router)
 app.include_router(api_enrich.router)
-app.include_router(api_otp.router)
 
 # Serve frontend static files if available (for combined deployment)
 import os as _os
