@@ -33,6 +33,13 @@ app.include_router(api_import.router)
 app.include_router(api_research.router)
 app.include_router(api_enrich.router)
 
+# Serve frontend static files if available (for combined deployment)
+import os as _os
+_static_dir = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "static")
+if _os.path.isdir(_static_dir):
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")
+
 
 @app.on_event("startup")
 def _startup():
