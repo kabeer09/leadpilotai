@@ -43,9 +43,26 @@ if _os.path.isdir(_static_dir):
 
 @app.on_event("startup")
 def _startup():
-    # Ensure research tables exist (additive, safe)
+    # Ensure all tables exist (additive, safe)
     from app.database import Base, engine
     Base.metadata.create_all(bind=engine)
+    # Add missing columns to existing tables (auto-migrate)
+    from sqlalchemy import text as _t, inspect as _insp
+    conn = engine.connect()
+    try:
+        inspector = _insp(engine)
+        if "users" in inspector.get_table_names():
+            cols = [c["name"] for c in inspector.get_columns("users")]
+            if "whatsapp_number" not in cols:
+                conn.execute(_t("ALTER TABLE users ADD COLUMN whatsapp_number VARCHAR(20)"))
+            if "whatsapp_verified" not in cols:
+                conn.execute(_t("ALTER TABLE users ADD COLUMN whatsapp_verified BOOLEAN DEFAULT FALSE"))
+            conn.commit()
+    except Exception as e:
+        import logging
+        logging.warning("Migration check: %s" % str(e)[:200])
+    finally:
+        conn.close()
     for w in startup_warnings():
         logger.warning(f"CONFIG: {w}")
     # A fresh process owns no crawl threads: any CRAWLING row is stale
