@@ -35,10 +35,23 @@ app.include_router(api_enrich.router)
 
 # Serve frontend static files if available (for combined deployment)
 import os as _os
+from fastapi.responses import FileResponse
 _static_dir = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "static")
 if _os.path.isdir(_static_dir):
     from fastapi.staticfiles import StaticFiles
-    app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")
+    # API routes are already registered above, so this catch-all only
+    # handles non-API paths (SPA routing).
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str):
+        # Serve static files if they exist
+        file_path = _os.path.join(_static_dir, full_path)
+        if _os.path.isfile(file_path):
+            return FileResponse(file_path)
+        # Otherwise serve index.html for SPA routing
+        index = _os.path.join(_static_dir, "index.html")
+        if _os.path.isfile(index):
+            return FileResponse(index)
+        return {"detail": "Not Found"}
 
 
 @app.on_event("startup")
