@@ -54,7 +54,7 @@ def get_google_config(db=None) -> tuple[str, str, str]:
         pass
     return (cid or settings.GOOGLE_CLIENT_ID,
             sec or settings.GOOGLE_CLIENT_SECRET,
-            redir or settings.GOOGLE_REDIRECT_URI)
+            redir or settings.google_redirect_uri)
 
 
 def google_configured(db=None) -> bool:
@@ -189,13 +189,13 @@ def client_status(db: Session = Depends(get_db)):
     row = db.query(GoogleOAuthConfig).filter(GoogleOAuthConfig.id == 1).first()
     if row:
         return {"configured": True, "source": "signup",
-                "redirect_uri": row.redirect_uri or settings.GOOGLE_REDIRECT_URI}
+                "redirect_uri": row.redirect_uri or settings.google_redirect_uri}
     cid, _, _ = get_google_config(db)
     if cid:
         return {"configured": True, "source": "server",
-                "redirect_uri": settings.GOOGLE_REDIRECT_URI}
+                "redirect_uri": settings.google_redirect_uri}
     return {"configured": False, "source": "none",
-            "redirect_uri": settings.GOOGLE_REDIRECT_URI}
+            "redirect_uri": settings.google_redirect_uri}
 
 
 @router.post("/client",
@@ -210,7 +210,7 @@ def save_client(payload: dict, request: Request, db: Session = Depends(get_db)):
     from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
     cid = (payload.get("client_id") or "").strip()
     sec = (payload.get("client_secret") or "").strip()
-    redir = (payload.get("redirect_uri") or "").strip() or settings.GOOGLE_REDIRECT_URI
+    redir = (payload.get("redirect_uri") or "").strip() or settings.google_redirect_uri
     if not cid or not sec:
         raise HTTPException(status_code=422, detail="client_id and client_secret are required")
     if len(cid) > 500 or len(sec) > 500 or "." not in cid:

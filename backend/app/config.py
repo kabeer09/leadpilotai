@@ -34,13 +34,19 @@ class Settings(BaseSettings):
     # Google OAuth (Sign in with Google + Gmail send). Empty = button hidden.
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
-    GOOGLE_REDIRECT_URI: str = "http://127.0.0.1:8002/api/auth/google/callback"
+    GOOGLE_REDIRECT_URI: str = ""  # Auto-derived from APP_URL if empty
 
     # Browser rendering fallback (JS-heavy pages). Disable where Chromium
     # is unavailable (tiny containers): rendering then degrades to an
     # honest "js-shell" event instead of failing.
     PLAYWRIGHT_ENABLED: bool = True
     MAX_RENDER_PAGES: int = 25
+
+    @property
+    def google_redirect_uri(self) -> str:
+        if self.GOOGLE_REDIRECT_URI:
+            return self.GOOGLE_REDIRECT_URI
+        return self.APP_URL.rstrip("/") + "/api/auth/google/callback"
 
     # Rate limits (requests per minute per IP)
     RATE_LOGIN_PER_MIN: int = 10
