@@ -105,9 +105,14 @@ export const importManualUrl = (d: object) => api.post('/import/manual-url', d).
 
 // Research
 export const researchCompany = (id: number) => api.get('/research/company/' + id).then((r) => r.data);
-export const generateDraft = (id: number) => api.post('/research/draft/' + id, {}).then((r) => r.data);
+export const generateDraft = (id: number, d?: object) => api.post('/research/draft/' + id, d || {}).then((r) => r.data);
 export const listQualified = (minScore = 40) => api.get('/research/qualified', { params: { min_score: minScore } }).then((r) => r.data);
 export const runResearch = (d: object) => api.post('/research/run', d).then((r) => r.data);
+
+// Verification
+export const verifyEmail = (d: object) => api.post('/verify/email', d).then((r) => r.data);
+export const verifyBatch = (d: object) => api.post('/verify/batch', d).then((r) => r.data);
+export const geminiStatus = () => api.get('/verify/gemini-status').then((r) => r.data);
 
 // Enrichment
 export const enrichWebsite = (id: number) => api.post('/enrich/website/' + id, {}).then((r) => r.data);

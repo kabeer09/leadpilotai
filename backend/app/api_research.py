@@ -94,22 +94,26 @@ def list_qualified(
 @router.post("/research/draft/{company_id}")
 def generate_draft(
     company_id: int,
+    payload: dict = {},
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Generate an outreach draft for a company (no sending)."""
+    """Generate an outreach draft for a company (no sending). Uses Gemini if available."""
     company = db.query(Company).filter(
         Company.id == company_id, Company.user_id == user.id).first()
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
 
     from app.agents import research_company_website, qualify_buyer, generate_outreach_draft
+    from app.config import settings
     research = research_company_website(company, db)
     qualification = qualify_buyer(company, research)
-    draft = generate_outreach_draft(company, qualification, research)
+    gemini_key = payload.get("gemini_key") or settings.GEMINI_API_KEY
+    draft = generate_outreach_draft(company, qualification, research, gemini_key)
 
     return {
         "company_id": company.id,
         "company_name": company.name,
         "draft": draft,
+        "ai_available": bool(gemini_key),
     }

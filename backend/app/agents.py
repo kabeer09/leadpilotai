@@ -353,11 +353,91 @@ def validate_phone_contact(phone: str, source_url: str, extraction_method: str,
     }
 
 
+# ── Gemini AI Personalization ─────────────────────────────────────────────
+
+def gemini_personalize_email(company: Company, qualification: dict,
+                              research: dict, api_key: str = None) -> dict | None:
+    """Use Gemini to personalize an outreach email based on company research.
+
+    Returns None if Gemini is unavailable or fails. Falls back to template.
+    """
+    import os
+    key = api_key or os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        return None
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+
+        name = company.name or "your company"
+        country = company.country or "your market"
+        products = research.get("description") or company.product_summary or ""
+        buyer_type = qualification.get("buyer_type", "Unclear")
+        product_fit = qualification.get("product_fit", "relevant products")
+
+        prompt = (
+            "Write a professional B2B outreach email from NLI Collections (copper "
+            "water bottles, copper drinkware, brass/copper handicrafts, kitchenware, "
+            "home decor, giftware manufacturer in Moradabad, India) to %s in %s.\n\n"
+            "Company info: %s\n"
+            "Buyer type: %s\n"
+            "Product fit: %s\n\n"
+            "Requirements:\n"
+            "- Subject line (max 60 chars)\n"
+            "- Professional, concise body (150-200 words)\n"
+            "- Mention their products/business model\n"
+            "- Clear call to action (request for catalogue discussion)\n"
+            "- No fabricated claims, certifications, or prices\n"
+            "- Sign off as NLI Collections, Moradabad, India\n\n"
+            "Format:\n"
+            "SUBJECT: <subject>\n"
+            "BODY:\n<body>"
+        ) % (name, country, products[:500], buyer_type, product_fit)
+
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+
+        subject = ""
+        body = ""
+        if "SUBJECT:" in text:
+            parts = text.split("BODY:", 1)
+            subject = parts[0].replace("SUBJECT:", "").strip()
+            body = parts[1].strip() if len(parts) > 1 else ""
+        else:
+            body = text
+
+        if not body:
+            return None
+
+        return {
+            "subject": subject or "Partnership inquiry — copper drinkware for %s" % name,
+            "body": body,
+            "language": "en",
+            "personalization_evidence": qualification.get("supporting_snippets", [])[:5],
+            "source_links": qualification.get("evidence_urls", [])[:5],
+            "buyer_type": buyer_type,
+            "product_fit": product_fit,
+            "requires_approval": True,
+            "auto_send": False,
+            "ai_generated": True,
+        }
+    except Exception as e:
+        print("Gemini error: %s" % str(e)[:200], flush=True)
+        return None
+
+
 # ── Agent 5: Outreach Draft Agent ─────────────────────────────────────────
 
 def generate_outreach_draft(company: Company, qualification: dict,
-                           research: dict) -> dict:
-    """Generate an editable email draft. No sending. No fabrication."""
+                           research: dict, gemini_key: str = None) -> dict:
+    """Generate an editable email draft. Tries Gemini first, falls back to template.
+    No sending. No fabrication."""
+    # Try Gemini AI first
+    ai_draft = gemini_personalize_email(company, qualification, research, gemini_key)
+    if ai_draft:
+        return ai_draft
+
     name = company.name or "your company"
     country = company.country or "your market"
     product_fit = qualification.get("product_fit", "relevant products")

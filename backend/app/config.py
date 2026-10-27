@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     # honest "js-shell" event instead of failing.
     PLAYWRIGHT_ENABLED: bool = True
     MAX_RENDER_PAGES: int = 25
+    # Gemini AI (optional — for AI email personalization)
+    GEMINI_API_KEY: str = ""
 
     @property
     def google_redirect_uri(self) -> str:
