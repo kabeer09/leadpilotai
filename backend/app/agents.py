@@ -368,7 +368,7 @@ def gemini_personalize_email(company: Company, qualification: dict,
     try:
         import google.generativeai as genai
         genai.configure(api_key=key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-3.5-flash")
 
         name = company.name or "your company"
         country = company.country or "your market"

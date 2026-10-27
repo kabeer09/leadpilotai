@@ -59,6 +59,6 @@ def verify_batch(payload: dict, db: Session = Depends(get_db),
 @router.get("/verify/gemini-status")
 def gemini_status():
     """Check if Gemini API is configured."""
-    import os
-    key = os.environ.get("GEMINI_API_KEY", "")
-    return {"configured": bool(key), "model": "gemini-1.5-flash" if key else None}
+    from app.config import settings
+    key = settings.GEMINI_API_KEY
+    return {"configured": bool(key), "model": "gemini-3.5-flash" if key else None}
