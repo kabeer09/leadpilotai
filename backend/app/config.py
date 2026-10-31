@@ -44,6 +44,18 @@ class Settings(BaseSettings):
     # Gemini AI (optional — for AI email personalization)
     GEMINI_API_KEY: str = ""
 
+    # WhatsApp automation (dryrun | meta). meta = WhatsApp Business Cloud API
+    # (requires an approved message template for first/cold contact).
+    WHATSAPP_PROVIDER: str = "dryrun"  # dryrun | meta
+    WHATSAPP_ACCESS_TOKEN: str = ""     # Meta permanent system-user token
+    WHATSAPP_PHONE_NUMBER_ID: str = ""  # your WABA phone number id
+    WHATSAPP_TEMPLATE_NAME: str = ""    # approved template, e.g. catalog_hello
+    WHATSAPP_TEMPLATE_LANG: str = "en"
+    # Which variables we can fill in the template body, in order.
+    # Available: company | country | phone | message
+    WHATSAPP_TEMPLATE_VARS: str = "company"
+    DAILY_WHATSAPP_LIMIT: int = 1000
+
     @property
     def google_redirect_uri(self) -> str:
         if self.GOOGLE_REDIRECT_URI:
@@ -72,6 +84,11 @@ def startup_warnings() -> list[str]:
         missing.append("EMAIL_PROVIDER=smtp but SMTP_HOST/SMTP_FROM are empty")
     if settings.EMAIL_PROVIDER == "resend" and not (settings.RESEND_API_KEY and settings.RESEND_FROM):
         missing.append("EMAIL_PROVIDER=resend but RESEND_API_KEY/RESEND_FROM are empty")
+    if settings.WHATSAPP_PROVIDER == "meta":
+        if not (settings.WHATSAPP_ACCESS_TOKEN and settings.WHATSAPP_PHONE_NUMBER_ID):
+            missing.append("WHATSAPP_PROVIDER=meta but WHATSAPP_ACCESS_TOKEN/PHONE_NUMBER_ID are empty")
+        if not settings.WHATSAPP_TEMPLATE_NAME:
+            missing.append("WHATSAPP_PROVIDER=meta but WHATSAPP_TEMPLATE_NAME is empty (cold messages need an approved template)")
     if settings.DATABASE_URL.startswith("sqlite"):
         missing.append("Using local SQLite (fine for trial dev; use PostgreSQL in production)")
     return missing

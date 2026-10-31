@@ -23,7 +23,7 @@ def overview(days: int = 30, db: Session = Depends(get_db),
         Contact.user_id == user.id, Contact.kind.in_(["PHONE", "WHATSAPP"])).scalar() or 0
     wa_identified = db.query(func.count(Contact.id)).filter(
         Contact.user_id == user.id, Contact.kind == "WHATSAPP",
-        Contact.whatsapp_status == "identified").scalar() or 0
+        Contact.whatsapp_status.in_(["identified", "on_whatsapp"])).scalar() or 0
     qualified = db.query(func.count(Lead.id)).filter(
         Lead.user_id == user.id, Lead.status == "QUALIFIED").scalar() or 0
     new_cos = db.query(func.count(Company.id)).filter(

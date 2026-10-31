@@ -20,6 +20,7 @@ from app.database import SessionLocal
 from app.models import Source, CrawlJob, CrawlEvent, Company, Contact, Lead
 from app.ssrf import validate_url
 from app.validation import domain_of, _base_domain
+from app.whatsapp import phone_e164, source_default_region
 
 logger = logging.getLogger(__name__)
 
@@ -571,8 +572,15 @@ def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
             have.add(("EMAIL", norm))
             primaries["EMAIL"] = False
             n_new += 1
+    # Country-code resolution for phones: company country first, then the
+    # fair's own default dial plan (e.g. High Point omits country → US).
+    # Resolved phones are stored as strict E.164 ('+<digits>').
+    _src = (db.query(Source).filter(Source.id == company.source_id).first()
+            if company.source_id else None)
+    _wa_region = source_default_region(_src.url if _src else None)
     for p in data["phones"]:
-        norm = normalize_phone(p)
+        e164, _how = phone_e164(p, company.country, _wa_region)
+        norm = e164 or normalize_phone(p)
         if norm and ("PHONE", norm) not in have:
             db.add(Contact(user_id=user_id, company_id=company.id, kind="PHONE",
                            value=norm, normalized=norm, source_url=url,
@@ -580,10 +588,13 @@ def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
             have.add(("PHONE", norm))
             n_new += 1
     for w in data["whatsapp"]:
-        if ("WHATSAPP", w) not in have:
+        e164, _how = phone_e164(w, company.country, _wa_region)
+        norm = e164 or normalize_phone(w)
+        if norm and ("WHATSAPP", norm) not in have:
             db.add(Contact(user_id=user_id, company_id=company.id, kind="WHATSAPP",
-                           value=w, normalized=w, source_url=url,
+                           value=norm, normalized=norm, source_url=url,
                            source_page=_page_type(url), whatsapp_status="identified"))
+            have.add(("WHATSAPP", norm))
             n_new += 1
     # Directory social-media profiles (Facebook/Instagram/…) stored as their
     # own Contact kinds so they're visible/exportable without a schema change.
@@ -883,6 +894,10 @@ def _enrich_from_official_site(db, user_id: int, company: Company,
     have = {(c.kind, c.normalized) for c in
             db.query(Contact).filter(Contact.company_id == company.id).all()}
     added = 0
+    # Same country-code resolution as the main save path (E.164 storage).
+    _src = (db.query(Source).filter(Source.id == company.source_id).first()
+            if company.source_id else None)
+    _wa_region = source_default_region(_src.url if _src else None)
     for src_url, page, emails, phones, wa in found:
         for e in emails:
             norm = normalize_email(e)
@@ -893,7 +908,8 @@ def _enrich_from_official_site(db, user_id: int, company: Company,
                 have.add(("EMAIL", norm))
                 added += 1
         for p in phones:
-            norm = normalize_phone(p)
+            e164, _how = phone_e164(p, company.country, _wa_region)
+            norm = e164 or normalize_phone(p)
             if norm and ("PHONE", norm) not in have:
                 db.add(Contact(user_id=user_id, company_id=company.id,
                                kind="PHONE", value=norm, normalized=norm,
@@ -901,7 +917,8 @@ def _enrich_from_official_site(db, user_id: int, company: Company,
                 have.add(("PHONE", norm))
                 added += 1
         for w in wa:
-            norm = normalize_phone(w)
+            e164, _how = phone_e164(w, company.country, _wa_region)
+            norm = e164 or normalize_phone(w)
             if norm and ("WHATSAPP", norm) not in have:
                 db.add(Contact(user_id=user_id, company_id=company.id,
                                kind="WHATSAPP", value=norm, normalized=norm,

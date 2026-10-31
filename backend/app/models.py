@@ -222,6 +222,29 @@ class EmailMessage(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class WhatsAppMessage(Base):
+    """One WhatsApp send attempt (provider: whatsapp-dryrun | whatsapp-meta).
+
+    Honest states mirror EmailMessage: 'accepted' (provider took it) is never
+    reported as 'delivered'; 'on_whatsapp' registration is only ever set by
+    a real Meta answer, never by dryrun or format checks.
+    """
+    __tablename__ = "whatsapp_messages"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True, index=True)
+    to_phone = Column(String(32), nullable=False)  # strict E.164
+    body = Column(Text, nullable=True)             # freeform/record of intent
+    status = Column(String(30), default="queued", nullable=False, index=True)
+    # queued|accepted|delivered|failed|read
+    provider = Column(String(30), nullable=False)
+    provider_message_id = Column(String(255), nullable=True, index=True)
+    is_test = Column(Boolean, default=False, nullable=False)
+    error = Column(Text, nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class ProviderEvent(Base):
     __tablename__ = "provider_events"
     id = Column(Integer, primary_key=True)
