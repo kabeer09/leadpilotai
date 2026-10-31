@@ -8,6 +8,8 @@ frontend/.env.local
 
 # Runtime / local data (logs may contain callback codes)
 *.db
+*.db-shm
+*.db-wal
 *.log
 *.err
 trial.db*

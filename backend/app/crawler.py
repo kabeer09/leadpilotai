@@ -31,6 +31,12 @@ PAGE_DELAY = 1.0
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PHONE_RE = re.compile(r"(?:\+?\d[\d\s().-]{6,}\d)")
+# Directory social-media profiles -> stored as their own Contact kinds
+# (no schema change; kind is a free string). Value is the profile URL.
+SOCIAL_KINDS = {"facebook": "FACEBOOK", "instagram": "INSTAGRAM",
+                "twitter": "TWITTER", "youtube": "YOUTUBE",
+                "pinterest": "PINTEREST", "linkedin": "LINKEDIN",
+                "tiktok": "TIKTOK"}
 JUNK_EMAIL_DOMAINS = ("example.com", "example.org", "test.com", ".png", ".jpg")
 
 _cancel_flags: dict[int, threading.Event] = {}
@@ -579,6 +585,17 @@ def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
                            value=w, normalized=w, source_url=url,
                            source_page=_page_type(url), whatsapp_status="identified"))
             n_new += 1
+    # Directory social-media profiles (Facebook/Instagram/…) stored as their
+    # own Contact kinds so they're visible/exportable without a schema change.
+    for plat, su in (data.get("social") or {}).items():
+        kind = SOCIAL_KINDS.get(plat.lower())
+        su = (su or "").strip()
+        if kind and su.startswith("http") and (kind, su) not in have:
+            db.add(Contact(user_id=user_id, company_id=company.id, kind=kind,
+                           value=su, normalized=su, source_url=url,
+                           source_page="directory"))
+            have.add((kind, su))
+            n_new += 1
     if not data["emails"] and not data["phones"] and company.lifecycle == "active":
         # Only flag excluded when we never found anything AND row is new-ish;
         # crawler never hides companies that already have contacts.
@@ -653,7 +670,12 @@ def _find_company(db, user_id: int, url: str, host: str, name: str = None,
                     break
     if not existing:
         path = urlparse(url).path or "/"
-        if path in ("", "/"):
+        # A bare homepage (no path, no fragment) may re-appear under many
+        # URL shapes — collapse those by website. But a directory PROFILE url
+        # (e.g. .../exhibitor#exhibitor=<rid>) has an empty path yet a unique
+        # fragment; matching those by website would merge every distinct
+        # exhibitor into one row. Never collapse when a fragment is present.
+        if path in ("", "/") and not urlparse(url).fragment:
             existing = db.query(Company).filter(
                 Company.user_id == user_id, Company.website == host).first()
     return existing
@@ -897,6 +919,50 @@ def _enrich_from_official_site(db, user_id: int, company: Company,
     return added, pages_used
 
 
+def _merge_details(data: dict, det: dict | None) -> str:
+    """Merge an ANDMORE/OpenDetails contact card into page data.
+
+    Adds emails/phones plus city, country, address, booth, company name, the
+    exhibitor's REAL website (not the fair's directory domain) and their
+    social-media URLs. Returns a short event tag for the crawl log. Every
+    field is fill-only and safe to call twice (initial + post-render
+    re-merge) — re-extraction never loses the card."""
+    if not det:
+        return ""
+    for e in det.get("emails", []):
+        if e not in data["emails"]:
+            data["emails"].append(e)
+    for p in det.get("phones", []):
+        if p not in data["phones"]:
+            data["phones"].append(p)
+    for key in ("address", "booth", "city", "country"):
+        if det.get(key) and not data.get(key):
+            data[key] = det[key]
+    if det.get("company_name"):
+        data["details_name"] = det["company_name"]
+    # The exhibitor's own website beats the fair's domain; also registers as
+    # an official link so Stage-3 enrichment can crawl it for more contacts.
+    site = (det.get("website") or "").strip()
+    if site and not data.get("web_text"):
+        data["web_text"] = site
+        wh = (urlparse(site).hostname or "").lower()
+        if wh:
+            entry = (wh, site, f"Website {wh}")
+            if entry not in data.get("official_links", []):
+                data.setdefault("official_links", []).append(entry)
+    if det.get("social"):
+        data["social"] = {**det["social"], **(data.get("social") or {})}
+    tag = (f" +details:{len(det.get('emails', []))}e/"
+           f"{len(det.get('phones', []))}p")
+    if det.get("contact_names"):
+        tag += f" ({', '.join(det['contact_names'][:2])})"
+    if site:
+        tag += " +site"
+    if det.get("social"):
+        tag += f" +social:{len(det['social'])}"
+    return tag
+
+
 def _process_url(db, client, job, canon: str, depth: int,
                  base: str, base_host: str, shared: dict, force_recrawl: bool = False) -> None:
     """Fetch + extract + save ONE url (worker thread). All writes tenant-scoped."""
@@ -964,24 +1030,7 @@ def _process_url(db, client, job, canon: str, depth: int,
     # booth, company name) that the page only reveals after interaction.
     from app.fair_adapters import fetch_exhibitor_details
     det = fetch_exhibitor_details(canon)
-    det_tag = ""
-    if det:
-        for e in det.get("emails", []):
-            if e not in data["emails"]:
-                data["emails"].append(e)
-        for p in det.get("phones", []):
-            if p not in data["phones"]:
-                data["phones"].append(p)
-        for key in ("address", "booth"):
-            if det.get(key) and not data.get(key):
-                data[key] = det[key]
-        if det.get("company_name"):
-            data["details_name"] = det["company_name"]
-    if det:
-        det_tag = (f" +details:{len(det.get('emails', []))}e/"
-                   f"{len(det.get('phones', []))}p")
-        if det.get("contact_names"):
-            det_tag += f" ({', '.join(det['contact_names'][:2])})"
+    det_tag = _merge_details(data, det)
     stripped = strip_owner_emails(data, canon, shared)
     if stripped:
         det_tag += f" -owner-mail x{stripped}"
@@ -994,15 +1043,7 @@ def _process_url(db, client, job, canon: str, depth: int,
             via = "rendered"
             # Re-merge the details card (re-extraction wipes it) + keep the
             # fair's company name as fallback.
-            if det is not None:
-                for e in det.get("emails", []):
-                    if e not in data["emails"]:
-                        data["emails"].append(e)
-                for p in det.get("phones", []):
-                    if p not in data["phones"]:
-                        data["phones"].append(p)
-                if det.get("company_name"):
-                    data["details_name"] = det["company_name"]
+            _merge_details(data, det)
         elif render_err == "browser rendering unavailable":
             with lock:
                 shared["errors"].append(
@@ -1194,22 +1235,48 @@ def _ingest_adapter_records(db, job, records: list[dict],
                 "emails": rec.get("emails") or [],
                 "phones": rec.get("phones") or [],
                 "whatsapp": rec.get("whatsapp") or [],
-                "official_links": [],
+                # web_text -> company.website (the exhibitor's own site, not
+                # the directory host); social -> FACEBOOK/INSTAGRAM/… Contact
+                # rows via _save_company_inner.
+                "web_text": rec.get("official_website") or "",
+                "social": rec.get("social") or {},
+                "official_links": rec.get("official_links") or [],
                 "links": [], "text_len": 5000,
             }
             url = rec.get("profile_url") or job.url
+            site = rec.get("official_website")
             with lock:
                 comp = _save_company(db, job.user_id, job.source_id,
                                      url, data, 1, lock=None)
             if not comp:
                 continue
+            if not site and comp.website:
+                # _save_company falls back to the PAGE host — on a directory
+                # profile that is the fair's own domain, not the exhibitor's
+                # site. Never present the directory as a company's website.
+                # (Stored bare-host values carry no scheme, so compare
+                # registrable domains via domain_of on both sides.)
+                from app.validation import domain_of
+                pw = domain_of(url)
+                if pw and domain_of(comp.website) == pw:
+                    comp.website = None
+                    db_commit_retry(db)
             saved += 1
             with lock:
                 shared["companies"] += 1
                 shared["contacts"] += len(data["emails"]) + len(data["phones"])
-            site = rec.get("official_website")
-            if site and not data["emails"] and not data["phones"] \
-                    and shared["pages"] < job.max_pages:
+            # Stage 3: directories rarely publish the email, so a row still
+            # missing one enriches from its own site — a phone alone doesn't
+            # block it. Rows that already carry an email skip it (cheap
+            # re-crawls). Budget: max_pages bounds RECORDS here, while each
+            # record may cost up to ~5 visits (home + up to 3 contact pages +
+            # accounting) — so enrichment gets headroom (×6) instead of
+            # competing with the record cap.
+            if site and not data["emails"] \
+                    and shared["pages"] < job.max_pages * 6 \
+                    and not db.query(Contact).filter(
+                        Contact.company_id == comp.id,
+                        Contact.kind == "EMAIL").first():
                 extra, e_pages = _enrich_from_official_site(
                     db, job.user_id, comp, site, client,
                     render_budget=shared["render_budget"], job_id=job.id)
@@ -1259,7 +1326,7 @@ def run_job(job_id: int, force_recrawl: bool = False) -> None:
         # Stage 1: full-record adapters (Ambiente: name/address/hall/
         # products/email/phone per record), URL-list adapters (LVM), else seed.
         from app.fair_adapters import discover_profiles, discover_records
-        records, records_err = discover_records(seed_url)
+        records, records_err = discover_records(seed_url, max_pages)
         if records:
             with shared["lock"]:
                 shared["directory_mode"] = True
@@ -1289,7 +1356,12 @@ def run_job(job_id: int, force_recrawl: bool = False) -> None:
                                   status="ok",
                                   detail=f"[S1] generic crawl ({adapter_err[:100]})"))
                 db_commit_retry(db)
-            shared["queue"].put((seed_url, 0))
+            if not records:
+                # Records adapters already ingested every exhibitor — crawling
+                # the seed would only revisit the organizer's homepage, and in
+                # directory mode its links re-enter profile pages carrying the
+                # footer's shared phone/email junk.
+                shared["queue"].put((seed_url, 0))
 
         workers = max(1, settings.CRAWL_WORKERS)
         threads = [threading.Thread(

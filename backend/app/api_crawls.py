@@ -93,3 +93,35 @@ def cancel_crawl(job_id: int, db: Session = Depends(get_db),
     audit(db, user.id, "crawl_cancel", "crawl_job", job.id)
     db.commit()
     return {"id": job.id, "status": job.status}
+
+
+@router.post("/{job_id}/resume")
+def resume_crawl(job_id: int, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    """Re-start a crawl that died before finishing (e.g. process restart left it
+    CRAWLING/STALLED). Re-runs discovery + ingest; already-saved companies are
+    matched by profile_url/phone and updated in place, so resuming never
+    duplicates rows."""
+    job = db.query(CrawlJob).filter(
+        CrawlJob.id == job_id, CrawlJob.user_id == user.id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Crawl not found")
+    # COMPLETED/CANCELLED are terminal. FAILED is resumable: startup recovery
+    # marks a CRAWLING row FAILED after a crash ("backend restarted mid-run")
+    # and resuming re-runs discovery+ingest idempotently.
+    if job.status in ("COMPLETED", "CANCELLED"):
+        return {"id": job.id, "status": job.status, "detail": "already finished"}
+    # run_job requires PENDING on entry — flip first, then spawn the thread.
+    # start_job is a no-op (False) while this job's thread is still alive,
+    # which protects a genuinely running crawl from a double start.
+    prev_status = job.status
+    job.status = "PENDING"
+    job.finished_at = None
+    db.commit()
+    if not crawler.start_job(job.id):
+        job.status = prev_status
+        db.commit()
+        return {"id": job.id, "status": job.status, "detail": "already running"}
+    audit(db, user.id, "crawl_resume", "crawl_job", job.id)
+    db.commit()
+    return {"id": job.id, "status": job.status}

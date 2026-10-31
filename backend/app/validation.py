@@ -34,7 +34,16 @@ def normalize_phone(value: str | None) -> str:
         return ""
     text = value.strip()
     digits = re.sub(r"\D", "", text)
-    if len(digits) < 7 or len(digits) > 16:
+    international = text.startswith("+") or text.startswith("00")
+    # E.164 tops out at 15 digits; anything longer — and any long run NOT
+    # marked international — is a scraped fragment (a ZIP glued to a phone,
+    # an id from the page markup), not a dialable number.
+    if len(digits) < 7:
+        return ""
+    if international:
+        if len(digits) > 15:
+            return ""
+    elif len(digits) > 14:
         return ""
     if len(digits) == 8 and digits[:2] in ("19", "20") \
             and "01" <= digits[4:6] <= "12" and "01" <= digits[6:8] <= "31":

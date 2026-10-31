@@ -29,6 +29,14 @@ function Guard({ children }: { children: JSX.Element }) {
   return children;
 }
 
+// Logged-in users get the dashboard; logged-out visitors get the landing page.
+function RootGate() {
+  const { user, loading } = useAuth();
+  if (loading) return <p className="p-8 text-gray-500">Loading…</p>;
+  if (!user) return <Landing />;
+  return <Layout />;
+}
+
 export default function App() {
   return (
     <Routes>
@@ -39,7 +47,7 @@ export default function App() {
       <Route path="/reset" element={<Reset />} />
       <Route path="/unsubscribe" element={<Unsubscribe />} />
       <Route path="/auth/callback" element={<GoogleCallback />} />
-      <Route path="/" element={<Guard><Layout /></Guard>}>
+      <Route path="/" element={<RootGate />}>
         <Route index element={<Dashboard />} />
         <Route path="companies" element={<Companies />} />
         <Route path="companies/:id" element={<CompanyDetail />} />

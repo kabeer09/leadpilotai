@@ -132,3 +132,74 @@ def test_companies_endpoint_tenant_scoped():
         db.commit()
     finally:
         db.close()
+
+
+def test_resume_restarts_dead_crawl(monkeypatch):
+    """A CRAWLING job orphaned by a process restart can be resumed; terminal
+    jobs are refused; other tenants get 404."""
+    from app.models import CrawlJob as _J, Source as _S, User as _U
+    tokens = _user("resumeA@test.example")
+    db = SessionLocal()
+    try:
+        uid = db.query(_U).filter(_U.email == "resumea@test.example").first().id
+        src = _S(user_id=uid, name="Resume Src",
+                 url="https://example.com", status="CRAWLING")
+        db.add(src)
+        db.commit()
+        job = _J(user_id=uid, source_id=src.id, url="https://example.com",
+                 max_pages=5, max_depth=1, status="CRAWLING")
+        db.add(job)
+        db.commit()
+        jid, sid = job.id, src.id
+    finally:
+        db.close()
+
+    # don't actually crawl in tests: record the spawn instead
+    started = []
+    monkeypatch.setattr("app.crawler.start_job",
+                        lambda jid_, force=False: started.append(jid_) or True)
+
+    # resume flips CRAWLING -> PENDING and spawns the worker thread
+    r = client.post(f"/api/crawls/{jid}/resume", headers=_auth(tokens))
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "PENDING"
+    assert started == [jid]
+
+    # another tenant cannot resume it
+    b = _user("resumeB@test.example")
+    assert client.post(f"/api/crawls/{jid}/resume",
+                       headers=_auth(b)).status_code == 404
+
+    # FAILED (crash-recovered by startup) is resumable too
+    db = SessionLocal()
+    try:
+        j = db.query(_J).filter(_J.id == jid).first()
+        j.status = "FAILED"
+        db.commit()
+    finally:
+        db.close()
+    r = client.post(f"/api/crawls/{jid}/resume", headers=_auth(tokens))
+    assert r.status_code == 200
+    assert r.json()["status"] == "PENDING"
+    assert started == [jid, jid]
+
+    # terminal jobs are refused without a restart
+    db = SessionLocal()
+    try:
+        j = db.query(_J).filter(_J.id == jid).first()
+        j.status = "COMPLETED"
+        db.commit()
+    finally:
+        db.close()
+    r = client.post(f"/api/crawls/{jid}/resume", headers=_auth(tokens))
+    assert r.json()["status"] == "COMPLETED"
+    assert started == [jid, jid]  # no third spawn
+
+    # cleanup
+    db = SessionLocal()
+    try:
+        db.query(_J).filter(_J.id == jid).delete()
+        db.query(_S).filter(_S.id == sid).delete()
+        db.commit()
+    finally:
+        db.close()

@@ -238,9 +238,11 @@ ANDMORE_PROFILE_RE = None  # lazy compiled below
 def fetch_exhibitor_details(page_url: str) -> dict | None:
     """Full contact card for one ANDMORE exhibitor page via OpenDetails.
 
-    Returns {emails, phones, contact_names, address, booth, website} with
-    the profile URL as provenance, or None (not ANDMORE / no match / error).
-    One fast JSON call (~1s), polite delay included.
+    Returns {emails, phones, contact_names, address, booth, company_name,
+    city, country, website, social} with the profile URL as provenance, or
+    None (not ANDMORE / no match / error). One fast JSON call (~1s), polite
+    delay included. `website` is the exhibitor's OWN site (not the fair's
+    domain); `social` maps platform -> URL from the directory's socialMedia.
     """
     import re as _re2
     global ANDMORE_PROFILE_RE
@@ -305,6 +307,30 @@ def fetch_exhibitor_details(page_url: str) -> dict | None:
                 booth = ""
             time.sleep(0.4)
             company_name = (comp.get("companyName") or "").strip() or None
+            # The directory also carries the exhibitor's OWN website and
+            # social-media profiles (hidden behind interaction on the page).
+            info = (row.get("companyInformation") or {})
+            website = (info.get("companyWebsiteUrl") or "").strip()
+            if website and not website.startswith(("http://", "https://")):
+                website = "https://" + website
+            country = (ci.get("country") or "").strip()
+            # `country` is a numeric code; the readable name lives in
+            # countries[].displayValue (take the checked/first one).
+            for _c in (ci.get("countries") or []):
+                if isinstance(_c, dict) and (_c.get("displayValue") or "").strip():
+                    country = (_c["displayValue"] or "").strip()
+                    if _c.get("checked"):
+                        break
+            sm = row.get("socialMedia") or {}
+            social = {}
+            for _pk, _sk in (("facebookUrl", "facebook"),
+                             ("instagramUrl", "instagram"),
+                             ("twitterUrl", "twitter"),
+                             ("youtubeUrl", "youtube"),
+                             ("pintrestUrl", "pinterest")):
+                _v = (sm.get(_pk) or "").strip()
+                if _v.startswith("http"):
+                    social[_sk] = _v
             if not emails and not phones and not address and not booth \
                     and not company_name:
                 return None
@@ -312,7 +338,8 @@ def fetch_exhibitor_details(page_url: str) -> dict | None:
                     "contact_names": names,
                     "address": address or None, "booth": booth or None,
                     "company_name": company_name,
-                    "website": None}
+                    "city": city or None, "country": country or None,
+                    "website": website or None, "social": social or None}
     except Exception as e:
         logger.warning(f"OpenDetails {eid} failed: {str(e)[:100]}")
         return None
@@ -345,6 +372,219 @@ def _highpoint_profiles() -> tuple[list[str], str | None]:
             return (urls, None) if urls else (None, "no profile links found")
     except Exception as e:
         return None, f"High Point adapter failed: {str(e)[:150]}"
+
+
+# --- High Point Market: per-profile full-record builder ---------------------
+# Social hosts that may appear on a profile (exhibitor's own accounts vs the
+# organizer's footer accounts — the latter are filtered below).
+_HP_SOCIAL_HOSTS = ("facebook.", "fb.me", "instagram.", "twitter.",
+                    "x.com", "youtube.", "youtu.be", "pinterest.",
+                    "linkedin.", "tiktok.")
+# Owner tokens: the organizer's social URLs sit in EVERY profile footer.
+# Matching runs on the alphanumeric-only URL, so hyphens/case don't matter;
+# the channel-id prefix covers their YouTube link (no name inside its URL).
+_HP_OWNER_TOKENS = ("highpointmarket", "hpmarket", "ucdq7mjl")
+# The exhibitor's phone only comes from its own label — the page footer also
+# carries the market's phone (336.869.1000) and junk digit runs, and a shared
+# phone would make _find_company collapse distinct exhibitors into one row.
+_HP_PHONE_RE = re.compile(
+    r"(?:Corporate\s+)?Phone\s*:\s*([+(]?\d[\d\s().\-]{6,}\d)", re.I)
+# Showroom block: "… Back to Search <building/suite/floor> Shuttle Stop: …".
+_HP_BOOTH_RE = re.compile(
+    r"Back to Search\s+(.{3,90}?)\s+(?:Shuttle Stop|Neighborhood|"
+    r"Corporate\s+Phone|Phone)\s*:", re.I)
+
+
+def _social_platform(host: str) -> str | None:
+    """Map a social host to the platform key used for Contact kinds."""
+    if "facebook." in host or "fb.me" in host:
+        return "facebook"
+    if "instagram." in host:
+        return "instagram"
+    if "twitter." in host or host.startswith("x.com"):
+        return "twitter"
+    if "youtube." in host or "youtu.be" in host:
+        return "youtube"
+    if "pinterest." in host:
+        return "pinterest"
+    if "linkedin." in host:
+        return "linkedin"
+    if "tiktok." in host:
+        return "tiktok"
+    return None
+
+
+def _hp_org_ld(soup) -> dict | None:
+    """The profile's Organization JSON-LD (real name + real description).
+
+    The block ships with a trailing brace and sometimes raw control chars —
+    parse leniently (HTML-unescape, strip control chars, first-value
+    raw_decode) and accept only the Organization node (BusinessEvent blocks
+    share the same script tag and carry the event's, not the company's,
+    name/description)."""
+    import html as _html
+    import json as _json
+    for ld in soup.find_all("script", type="application/ld+json"):
+        raw = (ld.string if ld.string is not None else ld.get_text()) or ""
+        if '"Organization"' not in raw:
+            continue
+        txt = re.sub(r"[\x00-\x1f]", " ", _html.unescape(raw))
+        try:
+            obj, _end = _json.JSONDecoder().raw_decode(txt.lstrip())
+        except Exception:
+            continue
+        if isinstance(obj, dict) and obj.get("@type") == "Organization":
+            return obj
+    return None
+
+
+def parse_highpoint_profile(url: str, html: str) -> dict | None:
+    """One High Point /exhibitor/{id} page -> a full exhibitor record.
+
+    The profiles are server-rendered, so a single fetch yields the
+    exhibitor's name + Organization JSON-LD description, the LABELED
+    corporate phone, the showroom block, their own website and their own
+    social links. The organizer's footer values never enter: the phone only
+    from its 'Phone:' label, links only from non-owner domains, socials only
+    non-owner tokens (frequency-corrected afterwards in _highpoint_records).
+    Email isn't published on profiles — records ingest enriches it from each
+    exhibitor's own site (Stage 3).
+
+    Returns a record in the generic extractor schema, or None if empty."""
+    from urllib.parse import urlparse
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(" ", strip=True)
+    org = _hp_org_ld(soup) or {}
+    h1_el = soup.find("h1")
+    h1 = (h1_el.get_text(" ", strip=True) if h1_el else "")
+    title_el = soup.title
+    title = (title_el.get_text(strip=True) if title_el else "")
+    name = (org.get("name") or h1 or
+            re.sub(r"\s*-\s*High Point Market\s*$", "", title)).strip()
+    if not name:
+        return None
+    desc = re.sub(r"\s+", " ", str(org.get("description") or "")).strip()
+    phone_m = _HP_PHONE_RE.search(text)
+    booth_m = _HP_BOOTH_RE.search(text)
+    booth = (re.sub(r"\s+", " ", booth_m.group(1)).strip()[:100]
+             if booth_m else None)
+
+    links: list[tuple[str, str, str]] = []
+    social: dict[str, str] = {}
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href.startswith(("http://", "https://")):
+            continue
+        try:
+            host = (urlparse(href).hostname or "").lower()
+        except Exception:
+            continue
+        if not host:
+            continue
+        if any(t in host for t in _HP_SOCIAL_HOSTS):
+            plat = _social_platform(host)
+            key = re.sub(r"[^a-z0-9]", "", href.lower())
+            if plat and plat not in social \
+                    and not any(t in key for t in _HP_OWNER_TOKENS):
+                social[plat] = href
+            continue
+        if host.endswith("highpointmarket.org"):
+            continue
+        if any(g in host for g in ("google.", "apple.com", "microsoft.com")):
+            continue
+        if all(e[0] != host for e in links):
+            links.append((host, href, a.get_text(" ", strip=True)[:80]))
+
+    # Lazy import: crawler imports this module, so keep the edge one-way at
+    # call time. Picks the exhibitor's independent domain (never the fair's).
+    from app.crawler import _pick_official_site
+    picked = _pick_official_site(links, "www.highpointmarket.org")
+
+    return {
+        "title": name, "h1": name, "profile_name": name,
+        "description": desc,
+        "industry": "", "country": None, "city": None, "address": None,
+        "hall": None, "booth": booth,
+        "products": [],
+        "official_website": picked[1] if picked else None,
+        "profile_url": url,
+        "emails": [],  # not published on the profile; Stage-3 fills it
+        "phones": [phone_m.group(1)] if phone_m else [],
+        "whatsapp": [],
+        "official_links": links,
+        "links": [], "text_len": len(text),
+        "social": social,
+    }
+
+
+def _hp_drop_owner_socials(parsed: list[dict]) -> None:
+    """Remove organizer-wide social links from records (in-place).
+
+    The organizer's accounts appear in every profile footer while an
+    exhibitor's own links appear on their profile only — so any URL seen on
+    at least half the parsed pages is not the exhibitor's account (this
+    catches accounts whose URLs carry no owner token)."""
+    freq: dict[str, int] = {}
+    for rec in parsed:
+        for u in (rec.get("social") or {}).values():
+            k = re.sub(r"[^a-z0-9]", "", u.lower())
+            freq[k] = freq.get(k, 0) + 1
+    thresh = max(2, int((len(parsed) + 1) / 2))
+    for rec in parsed:
+        rec["social"] = {
+            p: u for p, u in (rec.get("social") or {}).items()
+            if freq.get(re.sub(r"[^a-z0-9]", "", u.lower()), 0) < thresh}
+
+
+def _highpoint_records(_seed_url: str,
+                       max_pages: int | None = None
+                       ) -> tuple[list[dict] | None, str | None]:
+    """High Point Market: full exhibitor records from the public directory.
+
+    Enumerates the directory (autocomplete JSON), then builds one record per
+    /exhibitor/{id} profile via parse_highpoint_profile. max_pages caps how
+    MANY exhibitors are built (it is the job's page budget; discovery itself
+    is unbilled, and the per-record Stage-3 enrichment is billed separately
+    by _ingest_adapter_records)."""
+    urls, err = _highpoint_profiles()
+    if not urls:
+        return None, err or "High Point directory returned no exhibitor profiles"
+    limit = max(1, min(int(max_pages or 1500), 1500))
+
+    parsed: list[dict] = []
+    with httpx.Client(timeout=30.0, headers={"User-Agent": UA},
+                      follow_redirects=True) as client:
+        for url in urls:
+            if len(parsed) >= limit:
+                break
+            html = None
+            for _attempt in range(2):
+                try:
+                    r = client.get(url)
+                except Exception:
+                    r = None
+                if r is not None and r.status_code == 200 and r.text:
+                    html = r.text
+                    break
+                time.sleep(3.0)   # throttling/5xx: one calm retry, then skip
+            if not html:
+                continue
+            time.sleep(0.25)      # polite pacing across profile fetches
+            try:
+                rec = parse_highpoint_profile(url, html)
+            except Exception as e:
+                logger.warning(f"High Point profile failed {url}: "
+                               f"{str(e)[:100]}")
+                continue
+            if rec:
+                parsed.append(rec)
+    if not parsed:
+        return None, "no High Point profile could be parsed"
+    _hp_drop_owner_socials(parsed)
+    logger.info(f"High Point: {len(parsed)} exhibitor records built")
+    return parsed, None
 
 
 def _hometex_profiles() -> tuple[list[str], str | None]:
@@ -435,12 +675,21 @@ def discover_profiles(seed_url: str) -> tuple[list[str] | None, str | None]:
     return None, None
 
 
-def discover_records(seed_url: str) -> tuple[list[dict] | None, str | None]:
-    """Full-record adapters (Ambiente). Returns (records, error)."""
+def discover_records(seed_url: str, max_pages: int | None = None
+                     ) -> tuple[list[dict] | None, str | None]:
+    """Full-record adapters (Ambiente, High Point). Returns (records, error).
+
+    max_pages is forwarded to adapters that build one record per fetched
+    page (High Point), so the job's page budget caps their record count."""
     host = (seed_url.split("//", 1)[-1].split("/", 1)[0] or "").lower()
     if "messefrankfurt.com" in host:
         try:
             return _ambiente_records(seed_url)
+        except Exception as e:
+            return None, f"adapter error: {str(e)[:150]}"
+    if "highpointmarket.org" in host:
+        try:
+            return _highpoint_records(seed_url, max_pages)
         except Exception as e:
             return None, f"adapter error: {str(e)[:150]}"
     return None, None
