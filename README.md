@@ -43,8 +43,11 @@ official-website enrichment for published contacts, CSV/Excel export.
 ### Enable it (Google Cloud)
 
 1. [Google Cloud Console](https://console.cloud.google.com/) → select or
-   create a project and link a **billing account** (Places API (New) is
-   pay-as-you-go; Text Search ≈ $0.032/request).
+   create a project and link a **billing account** (required even inside
+   the free tier). Places API (New) bills per request at the highest SKU
+   the field mask touches; with phone/website/rating fields that's
+   **Text Search Enterprise ≈ $0.035/request, first 1,000 free each
+   month** (free caps reset the 1st, Pacific time).
 2. **APIs & Services → Library** → enable **Places API (New)** and
    **Place Details (New)**.
 3. **APIs & Services → Credentials → Create credentials → API key**.
@@ -70,7 +73,7 @@ Automated tests mock the provider and never spend API credits.
 | `GB_REQUEST_DELAY` | 1.0 | seconds between website fetches |
 | `GB_SEARCH_TIMEOUT` | 20 | seconds per Google request |
 | `GB_SEARCH_MAX_RETRIES` | 3 | exponential backoff on 429/5xx |
-| `GB_COST_PER_CALL_USD` | 0.032 | cost estimate per request |
+| `GB_COST_PER_CALL_USD` | 0.035 | cost estimate per request (Enterprise SKU) |
 | `GB_DAILY_API_CALLS` | 500 | per-user daily Google budget |
 | `GB_ENRICHMENT_ENABLED` | true | website enrichment on/off |
 

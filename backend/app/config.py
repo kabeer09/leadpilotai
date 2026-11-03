@@ -57,9 +57,11 @@ class Settings(BaseSettings):
     GB_SEARCH_TIMEOUT: float = 20.0      # seconds per Google request
     GB_SEARCH_MAX_RETRIES: int = 3       # transient errors: exp. backoff
     GB_ENRICHMENT_ENABLED: bool = True
-    # Request budget: Places Text Search list SKU ≈ $0.032/request (US).
-    # Used for per-campaign cost estimates only — actual billing is Google's.
-    GB_COST_PER_CALL_USD: float = 0.032
+    # Request budget: our field mask (phone/website/rating) bills at the
+    # Text Search Enterprise SKU: ~$0.035/request after Google's 1,000 free
+    # Text Search requests/month (reset the 1st, Pacific time).
+    # Used for per-campaign cost estimates only — Google's invoice is truth.
+    GB_COST_PER_CALL_USD: float = 0.035
     GB_DAILY_API_CALLS: int = 500        # per-user daily Google request budget
 
     # WhatsApp automation (dryrun | meta). meta = WhatsApp Business Cloud API

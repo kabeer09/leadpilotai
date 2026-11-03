@@ -408,7 +408,7 @@ export default function GBLeads() {
             {busy ? 'Starting…' : 'Run search'}
           </button>
           <span className="text-xs text-gray-500">
-            ≈{cfg?.google_places.cost_per_call_usd ?? 0.032} USD per Google request ·
+            ≈{cfg?.google_places.cost_per_call_usd ?? 0.035} USD per Google request ·
             daily budget {cfg?.google_places.daily_call_budget ?? '…'} calls
           </span>
         </div>
