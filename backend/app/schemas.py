@@ -97,3 +97,46 @@ class CampaignSend(BaseModel):
 
 class TestSend(BaseModel):
     to_email: EmailStr | None = None  # default: account owner's address
+
+
+# ---- Google Business Lead Finder ----
+class GBCampaignCreate(BaseModel):
+    campaign_name: str = Field(min_length=1, max_length=255)
+    keywords: list[str] = Field(min_length=1, max_length=20)  # product keywords
+    categories: list[str] = Field(default_factory=list, max_length=10)
+    business_types: list[str] = Field(default_factory=list, max_length=10)
+    countries: list[str] = Field(default_factory=list, max_length=10)
+    state: str | None = Field(default=None, max_length=100)
+    cities: list[str] = Field(default_factory=list, max_length=20)
+    max_results: int = Field(default=20, ge=1, le=60)
+    # optional single-location quick search (campaigns allow many cities)
+    filters: dict = Field(default_factory=dict)
+    enrich: bool = False  # enqueue website enrichment after discovery
+    start: bool = True    # False = save as PAUSED draft
+
+    @field_validator("keywords")
+    @classmethod
+    def non_empty_keywords(cls, v: list[str]) -> list[str]:
+        cleaned = [k.strip() for k in v if k and k.strip()]
+        if not cleaned:
+            raise ValueError("At least one non-empty keyword is required")
+        return cleaned[:20]
+
+
+class GBLeadUpdate(BaseModel):
+    lead_status: str | None = Field(default=None, max_length=30)
+    # NEW|SAVED|CONTACTED|ARCHIVED
+
+
+class GBEnrichRequest(BaseModel):
+    lead_ids: list[int] = Field(default_factory=list, max_length=1000)
+    campaign_id: int | None = None
+
+
+class GBExportQuery(BaseModel):
+    campaign_id: int | None = None
+    format: str = "csv"  # csv | xlsx
+    only_with_email: bool = False
+    only_with_phone: bool = False
+    only_with_website: bool = False
+    min_relevance: int = Field(default=0, ge=0, le=100)

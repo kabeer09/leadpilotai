@@ -44,6 +44,24 @@ class Settings(BaseSettings):
     # Gemini AI (optional — for AI email personalization)
     GEMINI_API_KEY: str = ""
 
+    # Google Business Lead Finder (Places API New). Key stays server-side
+    # only — never sent to the browser. Empty = feature reports
+    # "not configured" honestly instead of failing silently.
+    GOOGLE_MAPS_API_KEY: str = ""
+    # Places Text Search (New) returns max 20/page; Google allows 3 pages
+    # => hard cap 60 results per search request.
+    GB_MAX_RESULTS_PER_SEARCH: int = 60
+    # Website enrichment bounds (spec: bounded crawling, configurable).
+    GB_MAX_PAGES_PER_SITE: int = 6
+    GB_REQUEST_DELAY: float = 1.0        # seconds between website fetches
+    GB_SEARCH_TIMEOUT: float = 20.0      # seconds per Google request
+    GB_SEARCH_MAX_RETRIES: int = 3       # transient errors: exp. backoff
+    GB_ENRICHMENT_ENABLED: bool = True
+    # Request budget: Places Text Search list SKU ≈ $0.032/request (US).
+    # Used for per-campaign cost estimates only — actual billing is Google's.
+    GB_COST_PER_CALL_USD: float = 0.032
+    GB_DAILY_API_CALLS: int = 500        # per-user daily Google request budget
+
     # WhatsApp automation (dryrun | meta). meta = WhatsApp Business Cloud API
     # (requires an approved message template for first/cold contact).
     WHATSAPP_PROVIDER: str = "dryrun"  # dryrun | meta
@@ -91,4 +109,7 @@ def startup_warnings() -> list[str]:
             missing.append("WHATSAPP_PROVIDER=meta but WHATSAPP_TEMPLATE_NAME is empty (cold messages need an approved template)")
     if settings.DATABASE_URL.startswith("sqlite"):
         missing.append("Using local SQLite (fine for trial dev; use PostgreSQL in production)")
+    if not settings.GOOGLE_MAPS_API_KEY:
+        missing.append("GOOGLE_MAPS_API_KEY is empty — Google Business Lead Finder "
+                       "shows 'not configured' until a Places API (New) key is set")
     return missing

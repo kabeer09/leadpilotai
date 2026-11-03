@@ -3,9 +3,10 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings, startup_warnings
-from app import api_auth, api_health, api_crawls, api_crm, api_email, api_analytics, api_admin, api_google, api_whatsapp, api_import, api_research, api_enrich, api_verify, api_verify
+from app import api_auth, api_health, api_crawls, api_crm, api_email, api_analytics, api_admin, api_google, api_whatsapp, api_import, api_research, api_enrich, api_verify, api_gbleads
 # Import research models so tables are created
 from app import models_research  # noqa: F401
+from app import models_gbleads  # noqa: F401
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ app.include_router(api_import.router)
 app.include_router(api_research.router)
 app.include_router(api_enrich.router)
 app.include_router(api_verify.router)
-app.include_router(api_verify.router)
+app.include_router(api_gbleads.router)
 
 # Serve frontend static files if available (for combined deployment)
 import os as _os
@@ -102,6 +103,38 @@ def _startup():
             db.close()
     except Exception as e:
         logger.warning(f"Stale-crawl recovery skipped: {e}")
+
+    # Same recovery for Google Business Lead Finder jobs: a fresh process
+    # owns no GB threads, so RUNNING/PENDING rows are stale; FAILED unlocks
+    # Retry (search resume and enrich retry are both idempotent).
+    try:
+        from app.database import SessionLocal
+        from app.models_gbleads import SearchCampaign, GBJob
+        from datetime import datetime
+        db = SessionLocal()
+        try:
+            stale = db.query(SearchCampaign).filter(
+                SearchCampaign.status == "RUNNING").all()
+            for job in stale:
+                job.status = "FAILED"
+                job.finished_at = datetime.utcnow()
+                job.error = ((job.error or "") +
+                             "\nbackend restarted mid-run").strip()[:2000]
+            stale_jobs = db.query(GBJob).filter(
+                GBJob.status.in_(["RUNNING", "PENDING"])).all()
+            for job in stale_jobs:
+                job.status = "FAILED"
+                job.finished_at = datetime.utcnow()
+                job.error = "backend restarted mid-run"
+            if stale or stale_jobs:
+                db.commit()
+                logger.warning(
+                    f"Recovered {len(stale)} stale GB campaign(s) and "
+                    f"{len(stale_jobs)} stale GB job(s) as FAILED")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"Stale-GB recovery skipped: {e}")
 
 
 @app.get("/")

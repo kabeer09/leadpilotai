@@ -118,6 +118,27 @@ export const geminiStatus = () => api.get('/verify/gemini-status').then((r) => r
 export const enrichWebsite = (id: number) => api.post('/enrich/website/' + id, {}).then((r) => r.data);
 export const enrichBatch = (d: object) => api.post('/enrich/batch', d).then((r) => r.data);
 
+// Google Business Lead Finder
+export const gbCreateCampaign = (d: object) => api.post('/gbleads/campaigns', d).then((r) => r.data);
+export const gbListCampaigns = () => api.get('/gbleads/campaigns').then((r) => r.data);
+export const gbGetCampaign = (id: number) => api.get(`/gbleads/campaigns/${id}`).then((r) => r.data);
+export const gbCancelCampaign = (id: number) => api.post(`/gbleads/campaigns/${id}/cancel`).then((r) => r.data);
+export const gbPauseCampaign = (id: number) => api.post(`/gbleads/campaigns/${id}/pause`).then((r) => r.data);
+export const gbResumeCampaign = (id: number) => api.post(`/gbleads/campaigns/${id}/resume`).then((r) => r.data);
+export const gbListLeads = (p: Record<string, string | number | boolean>) =>
+  api.get('/gbleads/leads', { params: p }).then((r) => r.data);
+export const gbGetLead = (id: number) => api.get(`/gbleads/leads/${id}`).then((r) => r.data);
+export const gbUpdateLead = (id: number, d: object) => api.patch(`/gbleads/leads/${id}`, d).then((r) => r.data);
+export const gbEnrich = (d: object) => api.post('/gbleads/enrich', d).then((r) => r.data);
+export const gbListJobs = () => api.get('/gbleads/jobs').then((r) => r.data);
+export const gbCancelJob = (id: number) => api.post(`/gbleads/jobs/${id}/cancel`).then((r) => r.data);
+export const gbRetryJob = (id: number) => api.post(`/gbleads/jobs/${id}/retry`).then((r) => r.data);
+export const gbSettings = () => api.get('/gbleads/settings').then((r) => r.data);
+// Authenticated download: fetch as blob (a plain <a> link can't carry the
+// Authorization header), then save client-side.
+export const gbExport = (p: Record<string, string | number | boolean>) =>
+  api.get('/gbleads/export', { params: p, responseType: 'blob' }).then((r) => r.data as Blob);
+
 // Analytics + health
 export const overview = (days = 30) => api.get('/analytics/overview', { params: { days } }).then((r) => r.data);
 export const trends = (days = 30) => api.get('/analytics/trends', { params: { days } }).then((r) => r.data);

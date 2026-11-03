@@ -30,8 +30,49 @@ cd backend
 python -m pytest tests/ -q -p no:cacheprovider -W ignore
 ```
 
-Provider calls are mocked — tests never send real emails and never touch
-the dev database (isolated `test_trial.db`).
+Provider calls are mocked — tests never send real emails, never hit the
+Google Places API and never touch the dev database (isolated
+`test_trial.db`).
+
+## Google Business Lead Finder
+
+Second discovery channel beside the trade-fair crawler: keyword + location
+searches against **Google Places API (New)**, product-relevance scoring,
+official-website enrichment for published contacts, CSV/Excel export.
+
+### Enable it (Google Cloud)
+
+1. [Google Cloud Console](https://console.cloud.google.com/) → select or
+   create a project and link a **billing account** (Places API (New) is
+   pay-as-you-go; Text Search ≈ $0.032/request).
+2. **APIs & Services → Library** → enable **Places API (New)** and
+   **Place Details (New)**.
+3. **APIs & Services → Credentials → Create credentials → API key**.
+4. **Restrict the key**: application restrictions → your server's IP;
+   API restrictions → only the two APIs above.
+5. **Set a quota** (APIs & Services → Quotas) as a spend safety net; the
+   app additionally enforces its own per-user budget
+   (`GB_DAILY_API_CALLS`, default 500 requests/day).
+6. Put the key in `backend/.env` (gitignored — never commit it):
+   `GOOGLE_MAPS_API_KEY=your-key-here`
+7. Restart the backend — **Settings → Google Business Lead Finder** then
+   shows *configured*.
+
+Without a key the UI reports "not configured" and refuses to search.
+Automated tests mock the provider and never spend API credits.
+
+### Tunables (`backend/.env`)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GB_MAX_RESULTS_PER_SEARCH` | 60 | Google's cap (20/page × 3 pages) |
+| `GB_MAX_PAGES_PER_SITE` | 6 | bounded crawl per website |
+| `GB_REQUEST_DELAY` | 1.0 | seconds between website fetches |
+| `GB_SEARCH_TIMEOUT` | 20 | seconds per Google request |
+| `GB_SEARCH_MAX_RETRIES` | 3 | exponential backoff on 429/5xx |
+| `GB_COST_PER_CALL_USD` | 0.032 | cost estimate per request |
+| `GB_DAILY_API_CALLS` | 500 | per-user daily Google budget |
+| `GB_ENRICHMENT_ENABLED` | true | website enrichment on/off |
 
 ## Production build
 
@@ -48,17 +89,20 @@ See [`docs/deployment.md`](docs/deployment.md) (Render + Supabase),
 
 ## Project layout
 
-- `backend/app/` — FastAPI: auth, crawls, CRM, campaigns, analytics, admin
+- `backend/app/` — FastAPI: auth, crawls, CRM, campaigns, analytics, admin,
+  Google Business Lead Finder (Places API provider, enrichment, scoring)
 - `backend/alembic/` — migrations (never destructive; no `create_all` on boot)
-- `backend/tests/` — pytest suite (auth, crawler/SSRF, CRM, email, isolation)
+- `backend/tests/` — pytest suite (auth, crawler/SSRF, CRM, email, isolation,
+  business leads)
 - `frontend/src/` — React+TS+Vite+Tailwind pages (see Navigation below)
 - `render.yaml` — Render blueprint (Supabase Postgres + web + static)
 
 ## Navigation
 
-Overview, Companies, Leads, Website Crawling, Email Campaigns, Email
-Activity, Follow-ups, Analytics, Settings (+ public Landing/Login/Signup,
-password reset, one-click Unsubscribe).
+Overview, Companies, Leads, Business Leads (Google Business Lead Finder),
+Website Crawling, Email Campaigns, Email Activity, Follow-ups, Analytics,
+Settings (+ public Landing/Login/Signup, password reset, one-click
+Unsubscribe).
 
 ## Safety model (short version)
 
@@ -71,4 +115,5 @@ password reset, one-click Unsubscribe).
 - Follow-ups: off until enabled, max 1, 24h default, re-checked before
   send, skipped+flagged when state is unknown.
 - `accepted` ≠ `delivered` — delivery only on provider proof.
-- No WhatsApp automation in this release (provider interface reserved).
+- WhatsApp: dry-run by default; live sends/checks require Meta Cloud API
+  credentials, an approved template and double confirmation.

@@ -13,6 +13,8 @@ import Crawling from './pages/Crawling';
 import Campaigns from './pages/Campaigns';
 import CampaignDetail from './pages/CampaignDetail';
 import WhatsApp from './pages/WhatsApp';
+import GBLeads from './pages/GBLeads';
+import GBLeadDetail from './pages/GBLeadDetail';
 import EmailActivity from './pages/EmailActivity';
 import Followups from './pages/Followups';
 import Analytics from './pages/Analytics';
@@ -53,6 +55,8 @@ export default function App() {
         <Route path="companies/:id" element={<CompanyDetail />} />
         <Route path="leads" element={<Leads />} />
         <Route path="leads/:id" element={<LeadDetail />} />
+        <Route path="business-leads" element={<GBLeads />} />
+        <Route path="business-leads/:id" element={<GBLeadDetail />} />
         <Route path="crawling" element={<Crawling />} />
         <Route path="campaigns" element={<Campaigns />} />
         <Route path="campaigns/:id" element={<CampaignDetail />} />

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../auth';
-import api, { health, listSuppressions, gmailStatus } from '../lib/api';
+import api, { health, listSuppressions, gmailStatus, gbSettings } from '../lib/api';
 import { GoogleSetup } from './GoogleAuth';
 
 export default function Settings() {
@@ -10,11 +10,21 @@ export default function Settings() {
   const [verifyMsg, setVerifyMsg] = useState('');
   const [users, setUsers] = useState<{ id: number; email: string; is_active: boolean; is_admin: boolean }[]>([]);
   const [gmail, setGmail] = useState<{ connected: boolean; provider_mode: string } | null>(null);
+  const [gb, setGb] = useState<{
+    google_places: { configured: boolean; max_results_per_search: number;
+      cost_per_call_usd: number; calls_used_today: number; daily_call_budget: number };
+    enrichment: { enabled: boolean; max_pages_per_site: number;
+      request_delay_seconds: number };
+    usage: { campaigns: number; leads: number; enriched: number;
+      api_calls_total: number; estimated_cost_total_usd: number };
+    note: string;
+  } | null>(null);
 
   useEffect(() => {
     health().then(setSys).catch(() => {});
     listSuppressions().then(setSupp).catch(() => {});
     gmailStatus().then(setGmail).catch(() => {});
+    gbSettings().then(setGb).catch(() => {});
     refresh();
   }, []);
 
@@ -72,6 +82,37 @@ export default function Settings() {
           </ul>
         )}
       </div>
+      {gb && (
+        <div className="card">
+          <h2 className="font-semibold">Google Business Lead Finder</h2>
+          <p className="mt-1 text-sm text-gray-600">
+            Google Places API:{' '}
+            {gb.google_places.configured
+              ? <span className="badge bg-green-100 text-green-800">configured</span>
+              : <span className="badge bg-yellow-100 text-yellow-800">not configured</span>}
+            {'  '}Website enrichment:{' '}
+            {gb.enrichment.enabled
+              ? <span className="badge bg-green-100 text-green-800">enabled</span>
+              : <span className="badge bg-gray-200 text-gray-600">disabled</span>}
+          </p>
+          <ul className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1 text-sm text-gray-600 sm:grid-cols-2">
+            <li>Max results per search: <strong>{gb.google_places.max_results_per_search}</strong></li>
+            <li>Max pages per website: <strong>{gb.enrichment.max_pages_per_site}</strong></li>
+            <li>Request delay between pages: <strong>{gb.enrichment.request_delay_seconds}s</strong></li>
+            <li>Google requests: <strong>{gb.google_places.calls_used_today}</strong> today of{' '}
+              <strong>{gb.google_places.daily_call_budget}</strong>/day</li>
+            <li>Total Google requests: <strong>{gb.usage.api_calls_total}</strong> (~$
+              {gb.usage.estimated_cost_total_usd.toFixed(4)} estimated)</li>
+            <li>Campaigns: <strong>{gb.usage.campaigns}</strong> · Leads:{' '}
+              <strong>{gb.usage.leads}</strong> · Enriched: <strong>{gb.usage.enriched}</strong></li>
+          </ul>
+          {!gb.google_places.configured && (
+            <p className="mt-2 rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">
+              {gb.note}
+            </p>
+          )}
+        </div>
+      )}
       {!user?.email_verified && (
         <div className="card">
           <h2 className="font-semibold">Verify your email</h2>
