@@ -24,8 +24,10 @@ from app.google_places import (GooglePlacesProvider, PlacesAPIError,
                                provider_name)
 from app.models_gbleads import BusinessLead, LeadEvidence, SearchCampaign
 from app.osm_places import (OverpassProvider, build_details_query,
-                            build_overpass_query, keyword_regex,
+                            build_overpass_query, category_tag_hits,
+                            keyword_regex, mapped_categories,
                             parse_osm_element, parse_overpass_response)
+from app.gb_scoring import score_relevance
 
 client = TestClient(app)
 
@@ -163,6 +165,66 @@ def test_build_overpass_query_business_tags_without_keyword():
     ql = build_overpass_query("", BBOX, limit=10)
     assert 'node["shop"~".+"]' in ql and 'relation["amenity"~".+"]' in ql
     assert '"name"~' not in ql
+
+
+def test_build_overpass_query_mapped_keyword_adds_category_clauses():
+    """A curated keyword searches name/brand AND its OSM categories —
+    OSM stores are usually tagged by category, not by name."""
+    ql = build_overpass_query("cookware", BBOX, limit=50)
+    # name/brand regex still searched
+    assert 'node["name"~"cookware",i]' in ql
+    assert 'relation["brand"~"cookware",i]' in ql
+    # curated category clauses added alongside
+    assert 'node["shop"~"houseware|kitchen",i]' in ql
+    assert 'way["shop"~"houseware|kitchen",i]' in ql
+    assert ql.rstrip().endswith("out center tags 50;")
+
+
+def test_build_overpass_query_unmapped_keyword_stays_name_only():
+    """No guessed equivalences: an unmapped keyword is name/brand only."""
+    ql = build_overpass_query("copper bottles", BBOX, limit=50)
+    assert 'node["name"~"copper.*bottle",i]' in ql
+    assert '["shop"~"' not in ql
+
+
+def test_mapped_categories_is_curated_and_normalized():
+    assert mapped_categories("Kitchenware") == ("houseware", "kitchen")
+    assert mapped_categories("  Cookware. ") == ("houseware", "kitchen")
+    assert mapped_categories("copper bottles") == ()
+    assert mapped_categories(None) == ()
+
+
+def test_category_tag_hits_matches_primary_type_segment():
+    assert category_tag_hits(["cookware"], "houseware_shop") == [
+        ("cookware", "houseware")]
+    # multi-word keyword + underscored OSM value
+    assert category_tag_hits(["home decor"],
+                             "interior_decoration_shop") == [
+        ("home decor", "interior_decoration")]
+    # unrelated category -> no hit (never force a match)
+    assert category_tag_hits(["cookware"], "furniture_shop") == []
+    assert category_tag_hits(["cookware"], None) == []
+    assert category_tag_hits([], "houseware_shop") == []
+
+
+def test_score_relevance_tag_hits_add_reason_and_weight():
+    # without the tag hit: no evidence at all
+    s0, _l0, r0 = score_relevance(["cookware"], "Super Housewares",
+                                  "Houseware shop", [])
+    assert s0 == 0
+    assert all("OpenStreetMap" not in r for r in r0)
+    # with the curated tag hit: +20 and a reason naming the exact tag
+    s1, _l1, r1 = score_relevance(["cookware"], "Super Housewares",
+                                  "Houseware shop", [],
+                                  tag_hits=[("cookware", "houseware")])
+    assert s1 == 20
+    assert ("Keyword 'cookware' maps to the OpenStreetMap category "
+            "'houseware'") in r1
+    # when the category text already matched literally, the tag hit must
+    # not double-count the same fact
+    s2, _l2, _r2 = score_relevance(["houseware"], "X", "Houseware shop",
+                                   [], tag_hits=[("houseware", "houseware")])
+    assert s2 == 20
 
 
 def test_build_details_query():
@@ -493,5 +555,62 @@ def test_search_flow_osm_end_to_end(monkeypatch):
         reasons = with_email.match_reasons
         assert "OpenStreetMap search" in reasons
         assert "copper bottles in Sydney, Australia" in reasons
+    finally:
+        db.close()
+
+
+def test_search_flow_finds_category_tagged_stores_not_in_name(monkeypatch):
+    """The Ilford gap: stores whose NAME never contains the keyword but
+    whose OSM category tag does (shop=houseware for 'kitchenware') must be
+    discovered, scored, and carry the exact-tag reason."""
+    t = _user("osm-category@test.example")
+    elements = [
+        {"type": "node", "id": 301, "lat": -33.9, "lon": 151.2,
+         "tags": {"name": "Super Housewares", "shop": "houseware",
+                  "website": "https://superhousewares.example"}},
+        {"type": "node", "id": 302, "lat": -33.91, "lon": 151.3,
+         "tags": {"name": "DelightKB", "shop": "kitchen",
+                  "email": "info@delightkb.com", "phone": "+44 20 8988 9916"}},
+    ]
+    state, transport = _route(elements=elements)
+    monkeypatch.setattr(
+        gbleads_jobs, "get_places_provider",
+        lambda: OverpassProvider(transport=transport,
+                                 sleep=lambda s: None))
+
+    r = client.post("/api/gbleads/campaigns", json={
+        "campaign_name": "Ilford kitchenware categories",
+        "keywords": ["kitchenware"],
+        "countries": ["Australia"], "cities": ["Sydney"],
+        "max_results": 10, "enrich": False, "start": True,
+    }, headers=_auth(t))
+    assert r.status_code == 201, r.text
+    cid = r.json()["id"]
+    assert _wait_search(cid) == "COMPLETED"
+
+    c = client.get(f"/api/gbleads/campaigns/{cid}", headers=_auth(t)).json()
+    assert c["total_discovered"] == 2        # neither name says 'kitchenware'
+    assert c["error"] is None
+
+    db = SessionLocal()
+    try:
+        leads = {l.company_name: l for l in db.query(BusinessLead).filter(
+            BusinessLead.campaign_id == cid).all()}
+        assert set(leads) == {"Super Housewares", "DelightKB"}
+        sh = leads["Super Housewares"]
+        # category-tag match: +20 with the exact OSM tag in the reason
+        assert sh.relevance_score == 20
+        assert ("Keyword 'kitchenware' maps to the OpenStreetMap "
+                "category 'houseware'") in sh.match_reasons
+        # honest fields: OSM has no ratings; email only when published
+        assert sh.rating is None and sh.review_count is None
+        assert sh.email is None
+        dk = leads["DelightKB"]
+        assert dk.email == "info@delightkb.com"
+        assert ("category 'kitchen'") in dk.match_reasons
+        ev = (db.query(LeadEvidence)
+              .filter(LeadEvidence.lead_id == dk.id,
+                      LeadEvidence.field_name == "email").first())
+        assert ev is not None and ev.extraction_method == "osm_tag"
     finally:
         db.close()

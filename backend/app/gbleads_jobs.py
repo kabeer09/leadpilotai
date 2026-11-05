@@ -26,6 +26,7 @@ from app.google_places import (PlacesAPIError, PlacesConfigError,
 from app.gb_scoring import (score_relevance, classify_business_type,
                             normalize_domain, dedup_key_name_city)
 from app.gb_enricher import enrich_lead, _add_evidence
+from app.osm_places import category_tag_hits
 
 logger = logging.getLogger(__name__)
 
@@ -248,9 +249,15 @@ def run_search(campaign_id: int) -> None:
                 listing_text = " ".join(filter(None, [
                     p.get("name"), p.get("business_category"),
                     p.get("description") or ""]))
+                # OSM leads: a curated keyword->category hit is scored
+                # evidence (reason names the exact OSM tag). Google leads
+                # never use the map — its free-text search already covers
+                # semantics and the reason must not claim an OSM tag.
+                tag_hits = (category_tag_hits(keywords, p.get("primary_type"))
+                            if source == "openstreetmap" else None)
                 score, label, reasons = score_relevance(
                     keywords, p.get("name"), p.get("business_category"),
-                    [("listing", listing_text)])
+                    [("listing", listing_text)], tag_hits=tag_hits)
                 reasons.insert(0, f'Found via {search_label}: "{q["query"]}"')
                 btype, bev = classify_business_type(
                     [("listing", listing_text)])

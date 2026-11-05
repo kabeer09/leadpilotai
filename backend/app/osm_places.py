@@ -8,7 +8,10 @@ Honest tradeoffs (surfaced in the UI and README):
   wholesale — many places have no website, phone, or rating.
 - Ratings/reviews do not exist in OSM: they stay None, never fabricated.
 - Nominatim resolves each (city, state, country) to a bounding box (1 req,
-  cached per run); Overpass then scans named places inside that box.
+  cached per run); Overpass then scans places inside that box — by
+  name/brand regex AND, for curated keywords (cookware, furniture, ...),
+  by their OSM category tags (shop=houseware etc.), which is where OSM's
+  coverage actually lives.
   Location resolution failure raises — we never silently return "0 results"
   for a place we could not even find.
 - A campaign without any country/city is refused: a global Overpass regex
@@ -49,10 +52,75 @@ _STOPWORDS = {"in", "of", "the", "and", "for", "near", "a", "an", "at",
 _MISSING = object()      # bbox-cache miss sentinel
 _FAILED = object()       # bbox-cache "resolution failed" sentinel
 
+# Curated keyword -> OSM `shop` values. OSM's real strength is its category
+# tags, not names: "Super Housewares" is a perfect cookware lead even though
+# its name never says "cookware". The map is deliberately small and curated
+# (only clear retail categories) — unmapped keywords keep the name/brand
+# regex search, so nothing is ever matched on a guessed equivalence.
+KEYWORD_CATEGORY_MAP: dict[str, tuple[str, ...]] = {
+    "cookware": ("houseware", "kitchen"),
+    "kitchenware": ("houseware", "kitchen"),
+    "kitchen store": ("kitchen", "houseware"),
+    "kitchen shop": ("kitchen", "houseware"),
+    "homeware": ("houseware", "interior_decoration"),
+    "housewares": ("houseware",),
+    "home decor": ("interior_decoration",),
+    "hardware": ("hardware",),
+    "diy": ("hardware",),
+    "furniture": ("furniture",),
+    "electronics": ("electronics",),
+    "supermarket": ("supermarket", "grocery"),
+    "grocery": ("grocery", "supermarket"),
+    "bakery": ("bakery",),
+    "florist": ("florist",),
+    "books": ("books",),
+    "stationery": ("stationery",),
+    "clothing": ("clothes",),
+    "shoes": ("shoes",),
+    "jewelry": ("jewelry", "jewellery"),
+    "pharmacy": ("pharmacy",),
+    "garden centre": ("garden_centre",),
+    "bathroom": ("bathroom_furnishing",),
+}
+
 
 # ---------------------------------------------------------------------------
 # Pure builders (unit tested)
 # ---------------------------------------------------------------------------
+
+def _norm_kw(keyword: str | None) -> str:
+    return re.sub(r"\s+", " ", (keyword or "")).strip().lower().strip(
+        ".,!?:;()[]{}\"'/\\-")
+
+
+def mapped_categories(keyword: str | None) -> tuple[str, ...]:
+    """OSM shop values this keyword maps to via the curated map.
+
+    Empty tuple when unmapped — the query stays a name/brand search.
+    """
+    return KEYWORD_CATEGORY_MAP.get(_norm_kw(keyword), ())
+
+
+def category_tag_hits(keywords: list[str] | None,
+                      primary_type: str | None) -> list[tuple[str, str]]:
+    """[(keyword, osm_category)] when the place's OSM category is one the
+    keyword maps to. `primary_type` is the stored 'value_key' form
+    ('houseware_shop', 'interior_decoration_shop'), so each mapped value is
+    matched as the leading segment before '_key'. Used by the scorer to
+    give a category-tag match an honest, explainable reason."""
+    pt = str(primary_type or "")
+    if not pt:
+        return []
+    hits: list[tuple[str, str]] = []
+    for kw in (keywords or []):
+        kw = str(kw or "").strip()
+        if not kw:
+            continue
+        for cat in mapped_categories(kw):
+            if pt == cat or pt.startswith(cat + "_"):
+                hits.append((kw, cat))
+                break
+    return hits
 
 def keyword_regex(keyword: str | None) -> str | None:
     """POSIX regex matching a free-text keyword inside an OSM name.
@@ -83,22 +151,33 @@ def build_overpass_query(keyword: str | None, bbox: tuple | None = None,
     """Overpass QL selecting named (or business-tagged) places in a box.
 
     bbox = (south, west, north, east). Regex is matched case-insensitively
-    against `name` and `brand`; without a keyword we fall back to any place
-    carrying a business tag (shop/office/...).
+    against `name` and `brand`. When the keyword maps to curated OSM
+    categories (e.g. cookware -> shop=houseware|kitchen), those category
+    clauses are searched TOO — OSM stores are usually tagged by category
+    even when the name never contains the keyword. Without a keyword we
+    fall back to any place carrying a business tag (shop/office/...).
     """
     rx = keyword_regex(keyword)
+    cats = mapped_categories(keyword)
     area = ""
     if bbox:
         s, w, n, e = (float(v) for v in bbox)
         area = f"({s},{w},{n},{e})"
     lines = [f"[out:json][timeout:{max(5, int(timeout))}];", "("]
-    if rx:
-        # QL strings use C escaping; re.escape already escaped backslashes,
-        # only the quote needs an extra pass.
-        q = rx.replace('"', '\\"')
-        for typ in ("node", "way", "relation"):
-            lines.append(f'  {typ}["name"~"{q}",i]{area};')
-            lines.append(f'  {typ}["brand"~"{q}",i]{area};')
+    if rx or cats:
+        if rx:
+            # QL strings use C escaping; re.escape already escaped
+            # backslashes, only the quote needs an extra pass.
+            q = rx.replace('"', '\\"')
+            for typ in ("node", "way", "relation"):
+                lines.append(f'  {typ}["name"~"{q}",i]{area};')
+                lines.append(f'  {typ}["brand"~"{q}",i]{area};')
+        if cats:
+            # curated category tags for this keyword (values are plain
+            # OSM shop values — no regex metacharacters, escaped anyway)
+            qcat = "|".join(re.escape(c) for c in cats)
+            for typ in ("node", "way", "relation"):
+                lines.append(f'  {typ}["shop"~"{qcat}",i]{area};')
     else:
         for typ in ("node", "way", "relation"):
             for key in CATEGORY_KEYS:

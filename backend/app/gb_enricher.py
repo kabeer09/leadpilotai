@@ -27,6 +27,7 @@ from app.validation import (normalize_email, normalize_phone,
 from app.whatsapp import phone_e164
 from app.gb_scoring import (score_relevance, classify_business_type,
                             normalize_domain)
+from app.osm_places import category_tag_hits
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,14 @@ def extract_page(html: str, url: str) -> dict:
                 out["description"] = val[:1000]
             break
 
+    # Non-content subtrees are removed once, up front: the phone scan and
+    # the scoring text both run on VISIBLE text, never on raw HTML — SVG
+    # path data, CSS numbers and JSON inside <script> are the classic
+    # false-positive "phones" ("0 0 1000 1000", "497.39 361.8").
+    for tag in soup(["script", "style", "noscript", "svg"]):
+        tag.decompose()
+    visible = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))[:200_000]
+
     seen_e: set[str] = set()
     # mailto (highest confidence)
     for a in soup.find_all("a", href=True):
@@ -187,18 +196,31 @@ def extract_page(html: str, url: str) -> dict:
                                       "confidence": CONF["text_regex"]})
                 seen_e.add(norm)
 
-    # phones in text/tel-ish patterns (precision-first: a formatted grouping
-    # or '+' is required, year ranges like 2023-2024 are rejected)
+    # phones in visible text (precision-first: a formatted grouping or
+    # '+' is required; years, decimals and stray digit groups rejected —
+    # a wrong phone is worse than a missed one, nothing is guessed)
     seen_p: set[str] = set()
-    for raw in TEL_RE.findall(html):
+    for raw in TEL_RE.findall(visible):
         raw = raw.strip()
         digits = re.sub(r"\D", "", raw)
         if not (7 <= len(digits) <= 15) or digits.startswith(("1900", "1800")):
             continue
         if not any(c in raw for c in "+( ") and "-" not in raw:
             continue  # bare digit run — could be an id/price, not a phone
-        if re.fullmatch(r"(?:19|20)\d{2}[-\s]?(?:19|20)\d{2}", raw):
-            continue  # year pair
+        if "." in raw:
+            continue  # decimals/versions/dates: 497.39, 6.9, 12.05.2024
+        groups = [g for g in re.split(r"[-\s()]+", raw) if g]
+        if not groups:
+            continue
+        if all(re.fullmatch(r"(?:19|20)\d{2}", g) for g in groups):
+            continue  # year range: 1990-2024, "2024 - 2025"
+        if any(len(g) == 1 for g in groups[1:]):
+            continue  # stray single digit: '78-6306-4', '0 0 1000 1000'
+        if len(digits) < 10 and not digits.startswith("0"):
+            continue  # short, not trunk-dialled: reference/SKU codes
+            # ('4180-896', '5-4329-9629') are never dialable national
+            # numbers; real short local numbers are written with the
+            # trunk '0' (or a '+' for international)
         norm = ("+" + digits) if raw.startswith("+") else normalize_phone(raw)
         if norm and norm not in seen_p:
             out["phones"].append({"value": norm, "source_url": url,
@@ -423,13 +445,20 @@ def enrich_lead(lead: BusinessLead, db, user_id: int,
 
     # --- re-score + classify with website evidence ------------------------
     keywords = _campaign_keywords(lead, db)
+    # keep the curated OSM category-tag reason across the re-score
+    tag_hits = (category_tag_hits(keywords, lead.primary_type)
+                if lead.source_provider == "openstreetmap" else None)
     score, label, reasons = score_relevance(
-        keywords, lead.company_name, lead.business_category, evidence_texts)
+        keywords, lead.company_name, lead.business_category, evidence_texts,
+        tag_hits=tag_hits)
     lead.relevance_score = score
     lead.relevance_label = label
     lead.match_reasons = _json_list(reasons)
+    listing_src = ("OpenStreetMap listing"
+                   if lead.source_provider == "openstreetmap"
+                   else "Google listing")
     btype, bevidence = classify_business_type(
-        [("Google listing", f"{lead.company_name} {lead.business_category or ''}")]
+        [(listing_src, f"{lead.company_name} {lead.business_category or ''}")]
         + evidence_texts)
     lead.business_type = btype
     lead.business_type_evidence = _json_list(bevidence)

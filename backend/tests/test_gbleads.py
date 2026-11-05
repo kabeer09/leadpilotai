@@ -736,6 +736,33 @@ def test_extract_page_handles_missing_and_junk_fields():
     assert good["phones"] and good["phones"][0]["value"] == "+14155551234"
 
 
+def test_extract_page_never_makes_phones_from_svg_css_or_codes():
+    """Live regression (DelightKB/Howdens crawls): scanning raw HTML
+    picked up SVG coordinates, CSS decimals and product codes as
+    'phones'. The scan runs on visible text with precision guards."""
+    html = """
+    <html><head><style>.a { width: 497.39px; color: #fff }</style>
+    <script>var cfg = {"path": "M 24 24 0 0 0-28 6.9", "id": 438487692225};</script>
+    </head><body>
+    <svg viewBox="0 0 1000 1000"><path d="M0 0 512 512"/></svg>
+    <main>
+      <p>SKU 677631-225 and 78-6306-4 in stock</p>
+      <p>Ref 4180-896 and code 5-4329-9629 listed</p>
+      <p>Prices 497.39 and 6.99 updated 12.05.2024</p>
+      <p>Since 1990-2024 we served 1234567 customers</p>
+      <p>Open 2024 - 2025 season</p>
+      <p class="tel">Tel: 020 8988 9916</p>
+    </main>
+    <footer>WhatsApp +44 7732 323270</footer>
+    </body></html>"""
+    out = extract_page(html, "https://x.example")
+    values = [p["value"] for p in out["phones"]]
+    # exactly the two real published numbers, no junk
+    assert values == ["02089889916", "+447732323270"], values
+    # footer numbers count as visible content too
+    assert any("7732323270" in v for v in values)
+
+
 # ---------------------------------------------------------------------------
 # 12. background job processing + retry
 # ---------------------------------------------------------------------------

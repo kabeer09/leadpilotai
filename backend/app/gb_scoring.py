@@ -5,8 +5,10 @@ with a reason string that can be shown to the user and stored as evidence.
 
 Relevance (0-100):
  80-100 Highly Relevant | 60-79 Relevant | 40-59 Potential Match | 0-39 Low
-Compares the user's product keywords against: business name, Google
-category, and website text (title/description/products pages).
+Compares the user's product keywords against: business name, business
+category (Google Place Details or OSM tags — including the curated
+keyword->OSM-category map), and website text (title/description/products
+pages).
 
 Business type (evidence only — never assumed):
   Manufacturer | Importer | Wholesaler | Retailer | Distributor | Exporter
@@ -80,16 +82,25 @@ def label_for(score: int) -> str:
 def score_relevance(keywords: list[str],
                     name: str | None,
                     category: str | None,
-                    evidence_texts: list[tuple[str, str]]) -> tuple[int, str, list[str]]:
+                    evidence_texts: list[tuple[str, str]],
+                    tag_hits: list[tuple[str, str]] | None = None) -> tuple[int, str, list[str]]:
     """Score 0-100 with reasons.
 
     evidence_texts: [(text, source)] — source is a URL or 'Google listing'.
+    tag_hits: [(keyword, osm_category)] — curated OSM category-tag matches
+    (see osm_places.category_tag_hits); each adds the same weight as a
+    literal category-text match, with a reason naming the exact tag.
     Returns (score, label, reasons).
     """
     name_n = _norm_ws(name)
     cat_n = _norm_ws(category)
     name_toks = _tokens(name)
     cat_toks = _tokens(category)
+    # keyword -> curated OSM category value (normalized keyword form)
+    tag_map: dict[str, str] = {}
+    for k, v in (tag_hits or []):
+        if k and v:
+            tag_map.setdefault(_norm_ws(k), str(v))
     # per-segment normalized text for source-citing reasons
     segs = [(_norm_ws(t), src) for t, src in evidence_texts if t]
     site_n = " ".join(t for t, _ in segs)
@@ -128,16 +139,27 @@ def score_relevance(keywords: list[str],
                        f"'{kw}' appear in the business name")
 
         # business category (from Google Place Details or OSM tags)
+        cat_text_hit = False
         if _phrase_present(kw_n, cat_n) or kw_toks <= cat_toks:
+            cat_text_hit = True
             strength += 20
             sources_matched += 1
             why.append(f"Keyword '{kw}' matches the business category "
                        f"'{category or ''}'".rstrip())
         elif cat_toks and len(kw_toks & cat_toks) >= max(1, _majority(len(kw_toks))):
+            cat_text_hit = True
             strength += 8
             sources_matched += 1
             why.append(f"Part of '{kw}' matches the business category "
                        f"'{category or ''}'".rstrip())
+        elif kw_n in tag_map:
+            # curated OSM category tag (e.g. cookware -> shop=houseware):
+            # same fact as a category-text match, so same weight — never
+            # double-counted with the branch above.
+            strength += 20
+            sources_matched += 1
+            why.append(f"Keyword '{kw}' maps to the OpenStreetMap "
+                       f"category '{tag_map[kw_n]}'")
 
         # website pages (title/description/products text)
         site_full = _phrase_present(kw_n, site_n) or kw_toks <= site_toks

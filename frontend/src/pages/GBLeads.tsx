@@ -166,9 +166,16 @@ export default function GBLeads() {
   }, [leadParams]);
 
   useEffect(() => {
-    loadCfg(); loadCampaigns(); loadJobs(); loadLeads();
+    loadCfg(); loadCampaigns(); loadJobs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // leads re-fetch whenever filters/page change (View leads button,
+  // filter inputs, sorting, pagination) — loadLeads identity changes
+  // because leadParams depends on [lf, page].
+  useEffect(() => {
+    loadLeads();
+  }, [loadLeads]);
 
   // ---- polling while work is active ----
   const active =
