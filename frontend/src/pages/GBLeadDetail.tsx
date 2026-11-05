@@ -42,6 +42,7 @@ const methodLabel = (m: string | null) => {
     case 'tel_text': return 'Phone number written on the page';
     case 'wa_link': return 'WhatsApp link explicitly published';
     case 'place_details': return 'Google Place Details';
+    case 'osm_tag': return 'Published OpenStreetMap tag';
     case 'meta_description': return 'Page meta description';
     case 'social_anchor': return 'Social link on official website';
     case 'page_text': return 'Page text';
@@ -61,6 +62,12 @@ export default function GBLeadDetail() {
   const [err, setErr] = useState('');
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
+
+  // OpenStreetMap records carry an osm_* place_id / osm.org URL — labels
+  // must not claim "Google" data the record never had.
+  const isOsm =
+    !!lead && (lead.place_id?.startsWith('osm_') ||
+      !!lead.google_maps_url?.includes('openstreetmap'));
 
   const load = () => {
     if (!id) return;
@@ -161,7 +168,10 @@ export default function GBLeadDetail() {
         <div className="card lg:col-span-2">
           <h2 className="font-semibold">Company overview</h2>
           <p className="mt-2 whitespace-pre-wrap text-sm text-gray-700">
-            {lead.business_description || 'No description available from Google.'}
+            {lead.business_description ||
+              (isOsm
+                ? 'No description published in OpenStreetMap.'
+                : 'No description available from Google.')}
           </p>
           <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
             <div><dt className="text-gray-500">Category</dt>
@@ -190,14 +200,14 @@ export default function GBLeadDetail() {
                   ? <a className="text-primary-600" href={`mailto:${lead.email}`}>{lead.email}</a>
                   : '—'}
               </dd></div>
-            <div><dt className="text-gray-500">Google rating</dt>
+            <div><dt className="text-gray-500">{isOsm ? 'Rating' : 'Google rating'}</dt>
               <dd className="font-medium">
                 {lead.rating != null ? (
                   <span className="inline-flex items-center gap-1">
                     <Star className="h-4 w-4 fill-amber-400 text-amber-400" />
                     {lead.rating.toFixed(1)} ({lead.review_count ?? 0} reviews)
                   </span>
-                ) : '—'}
+                ) : isOsm ? '— (not in OpenStreetMap)' : '—'}
               </dd></div>
           </dl>
           {(socials.length > 0 || whatsapps.length > 0) && (

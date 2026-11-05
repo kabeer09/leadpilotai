@@ -127,16 +127,16 @@ def score_relevance(keywords: list[str],
             why.append(f"{len(kw_toks & name_toks)}/{len(kw_toks)} terms of "
                        f"'{kw}' appear in the business name")
 
-        # Google category
+        # business category (from Google Place Details or OSM tags)
         if _phrase_present(kw_n, cat_n) or kw_toks <= cat_toks:
             strength += 20
             sources_matched += 1
-            why.append(f"Keyword '{kw}' matches the Google category "
+            why.append(f"Keyword '{kw}' matches the business category "
                        f"'{category or ''}'".rstrip())
         elif cat_toks and len(kw_toks & cat_toks) >= max(1, _majority(len(kw_toks))):
             strength += 8
             sources_matched += 1
-            why.append(f"Part of '{kw}' matches the Google category "
+            why.append(f"Part of '{kw}' matches the business category "
                        f"'{category or ''}'".rstrip())
 
         # website pages (title/description/products text)
