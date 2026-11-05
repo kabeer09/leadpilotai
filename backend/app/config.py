@@ -62,7 +62,25 @@ class Settings(BaseSettings):
     # Text Search requests/month (reset the 1st, Pacific time).
     # Used for per-campaign cost estimates only — Google's invoice is truth.
     GB_COST_PER_CALL_USD: float = 0.035
-    GB_DAILY_API_CALLS: int = 500        # per-user daily Google request budget
+    GB_DAILY_API_CALLS: int = 500        # per-user daily search-request budget
+    # Which business-discovery provider feeds the Business Lead Finder:
+    #   auto          -> Google Places when GOOGLE_MAPS_API_KEY is set,
+    #                    otherwise the free OpenStreetMap (Overpass) provider
+    #   google        -> require the Google key (campaigns 400 without it)
+    #   openstreetmap -> always the free OSM provider (no key, no billing)
+    GB_PROVIDER: str = "auto"
+    # Free OpenStreetMap stack (no key, no billing; fair-use limits apply).
+    # The public instance is often at capacity — on network/5xx failures
+    # the provider walks the comma-separated mirror list below (in order)
+    # until one answers; an endpoint that dies is skipped for the run.
+    GB_OVERPASS_URL: str = "https://overpass-api.de/api/interpreter"
+    GB_OVERPASS_MIRROR_URL: str = (
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter,"
+        "https://overpass.kumi.systems/api/interpreter")
+    GB_NOMINATIM_URL: str = "https://nominatim.openstreetmap.org/search"
+    # The public Overpass instance routinely takes 40-60s under load and
+    # sometimes answers 502 "at capacity" — 90s with mirror failover.
+    GB_OVERPASS_TIMEOUT: float = 90.0
 
     # WhatsApp automation (dryrun | meta). meta = WhatsApp Business Cloud API
     # (requires an approved message template for first/cold contact).
@@ -111,7 +129,11 @@ def startup_warnings() -> list[str]:
             missing.append("WHATSAPP_PROVIDER=meta but WHATSAPP_TEMPLATE_NAME is empty (cold messages need an approved template)")
     if settings.DATABASE_URL.startswith("sqlite"):
         missing.append("Using local SQLite (fine for trial dev; use PostgreSQL in production)")
-    if not settings.GOOGLE_MAPS_API_KEY:
-        missing.append("GOOGLE_MAPS_API_KEY is empty — Google Business Lead Finder "
-                       "shows 'not configured' until a Places API (New) key is set")
+    if settings.GB_PROVIDER.strip().lower() == "google" and not settings.GOOGLE_MAPS_API_KEY:
+        missing.append("GB_PROVIDER=google but GOOGLE_MAPS_API_KEY is empty — "
+                       "Business Lead Finder campaigns cannot start")
+    elif not settings.GOOGLE_MAPS_API_KEY:
+        missing.append("GOOGLE_MAPS_API_KEY is empty — Business Lead Finder uses "
+                       "the free OpenStreetMap provider (add a Places API (New) "
+                       "key for Google-quality data)")
     return missing

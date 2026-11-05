@@ -25,7 +25,7 @@ from app.google_places import (PlacesAPIError, PlacesConfigError,
                                get_places_provider)
 from app.gb_scoring import (score_relevance, classify_business_type,
                             normalize_domain, dedup_key_name_city)
-from app.gb_enricher import enrich_lead
+from app.gb_enricher import enrich_lead, _add_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,16 @@ def api_used_today(db, user_id: int) -> int:
     return db.query(func.coalesce(func.sum(SearchCampaign.api_calls), 0)).filter(
         SearchCampaign.user_id == user_id,
         SearchCampaign.created_at >= day).scalar() or 0
+
+
+def _count_calls(c: SearchCampaign, provider, calls_before: int,
+                 cost_per_call: float) -> None:
+    """Count attempts made during one query — including failed ones, so the
+    daily budget cannot be bypassed by a loop of failing requests. Cost is
+    an estimate (failed requests are usually not billed); Google's invoice
+    / the free OSM provider are the source of truth."""
+    c.api_calls += provider.calls - calls_before
+    c.estimated_cost_usd = round(c.api_calls * cost_per_call, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +151,11 @@ def run_search(campaign_id: int) -> None:
                 names_seen.add(nk)
 
         provider = get_places_provider()
+        # provider-specific cost (Google ~$0.035/req, OpenStreetMap free)
+        cost_per_call = getattr(provider, "cost_per_call_usd",
+                                settings.GB_COST_PER_CALL_USD)
+        source = getattr(provider, "name", None) or "google_places"
+        search_label = getattr(provider, "search_label", None) or "Google search"
         per_query = max(1, math.ceil(c.max_results / len(queries)))
         per_query = min(per_query, settings.GB_MAX_RESULTS_PER_SEARCH)
         any_success = False
@@ -154,21 +169,19 @@ def run_search(campaign_id: int) -> None:
             # per-user daily request budget (spec: configurable budgets)
             if api_used_today(db, c.user_id) >= settings.GB_DAILY_API_CALLS:
                 c.status = "FAILED"
-                c.error = (f"Daily Google request budget reached "
+                c.error = (f"Daily search API request budget reached "
                            f"({settings.GB_DAILY_API_CALLS}/day) — partial "
                            f"results kept ({c.total_discovered}); retry tomorrow")
                 c.finished_at = datetime.utcnow()
                 db.commit()
                 return
+            calls_before = provider.calls
             try:
-                calls_before = provider.calls
-                places = provider.search(q["query"], max_results=per_query)
-                # provider.calls is cumulative on the instance — count the delta
-                c.api_calls += provider.calls - calls_before
-                c.estimated_cost_usd = round(
-                    c.api_calls * settings.GB_COST_PER_CALL_USD, 4)
+                places = provider.search(q["query"], max_results=per_query,
+                                         context=q)
                 any_success = True
             except PlacesQuotaError as e:
+                _count_calls(c, provider, calls_before, cost_per_call)
                 c.api_errors += 1
                 c.status = "FAILED"
                 c.error = str(e)[:900]
@@ -176,6 +189,7 @@ def run_search(campaign_id: int) -> None:
                 db.commit()
                 return
             except PlacesConfigError as e:
+                _count_calls(c, provider, calls_before, cost_per_call)
                 c.api_errors += 1
                 c.status = "FAILED"
                 c.error = str(e)[:900]
@@ -183,16 +197,25 @@ def run_search(campaign_id: int) -> None:
                 db.commit()
                 return
             except PlacesAPIError as e:
+                _count_calls(c, provider, calls_before, cost_per_call)
                 c.api_errors += 1
                 c.error = str(e)[:500]
                 db.commit()
                 logger.warning("gb search query failed: %s", e)
                 continue
+            # attempts count even on success (delta on the shared instance)
+            _count_calls(c, provider, calls_before, cost_per_call)
 
             for p in places:
                 if c.total_discovered >= c.max_results:
                     break
                 if not p.get("name"):
+                    c.total_skipped += 1
+                    continue
+                # permanently closed places are not leads (Google returns
+                # CLOSED_PERMANENTLY; OSM marks disused/abandoned -> CLOSED)
+                if p.get("business_status") in ("CLOSED_PERMANENTLY",
+                                                "CLOSED"):
                     c.total_skipped += 1
                     continue
                 # ---- dedup (spec: place id -> domain -> name+location) ----
@@ -227,14 +250,14 @@ def run_search(campaign_id: int) -> None:
                     p.get("description") or ""]))
                 score, label, reasons = score_relevance(
                     keywords, p.get("name"), p.get("business_category"),
-                    [("Google listing", listing_text)])
-                reasons.insert(0, f"Found via Google search: \"{q['query']}\"")
+                    [("listing", listing_text)])
+                reasons.insert(0, f'Found via {search_label}: "{q["query"]}"')
                 btype, bev = classify_business_type(
-                    [("Google listing", listing_text)])
+                    [("listing", listing_text)])
 
                 lead = BusinessLead(
                     user_id=c.user_id, campaign_id=c.id, place_id=pid,
-                    source_provider="google_places",
+                    source_provider=source,
                     company_name=p["name"],
                     business_category=p.get("business_category"),
                     primary_type=p.get("primary_type"),
@@ -243,6 +266,7 @@ def run_search(campaign_id: int) -> None:
                     website=p.get("website"),
                     website_domain=domain,
                     phone=p.get("phone"),
+                    email=p.get("email"),
                     country=p.get("country") or q.get("country"),
                     state=p.get("state") or q.get("state"),
                     city=p.get("city") or q.get("city"),
@@ -260,6 +284,14 @@ def run_search(campaign_id: int) -> None:
                                        else "NOT_ENRICHED"),
                     lead_status="NEW")
                 db.add(lead)
+                db.flush()  # need lead.id for the evidence row below
+                # an email published on the OSM record is sourced evidence
+                if p.get("email"):
+                    _add_evidence(
+                        db, lead, "email", p["email"],
+                        p.get("google_maps_url")
+                        or f"openstreetmap/{pid or ''}",
+                        "osm_tag", 0.85)
                 if pid:
                     places_seen.add(pid)
                 if domain:
@@ -276,7 +308,8 @@ def run_search(campaign_id: int) -> None:
             c.error = None
         else:
             c.status = "FAILED"
-            c.error = c.error or "Every Google request failed — see api_errors"
+            c.error = c.error or (
+                f"Every {search_label} request failed — see api_errors")
         c.finished_at = datetime.utcnow()
         db.commit()
 

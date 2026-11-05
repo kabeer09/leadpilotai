@@ -298,8 +298,10 @@ def enrich_lead(lead: BusinessLead, db, user_id: int,
                                   0.95)
             if campaign is not None and attempted:
                 campaign.api_calls += attempted
+                cost_per = getattr(provider, "cost_per_call_usd",
+                                   settings.GB_COST_PER_CALL_USD)
                 campaign.estimated_cost_usd = round(
-                    campaign.api_calls * settings.GB_COST_PER_CALL_USD, 4)
+                    campaign.api_calls * cost_per, 4)
         except Exception as e:
             res["errors"].append(f"details: {str(e)[:120]}")
 

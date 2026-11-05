@@ -91,7 +91,7 @@ class FakePlaces:
         self.calls = 0
         self.queries = []
 
-    def search(self, query, max_results=20):
+    def search(self, query, max_results=20, context=None):
         self.queries.append(query)
         self.calls += 1
         if self.fail:
@@ -370,8 +370,12 @@ def test_place_id_unique_per_user():
 # ---------------------------------------------------------------------------
 
 def test_create_campaign_requires_api_key(monkeypatch):
+    # GB_PROVIDER=google is an explicit opt-in: without a key there is no
+    # provider at all, so the API must say so honestly (auto mode falls
+    # back to the free OpenStreetMap provider instead — see osm tests).
     t = _user("gb-nokey@test.example")
     monkeypatch.setattr(cfg.settings, "GOOGLE_MAPS_API_KEY", "")
+    monkeypatch.setattr(cfg.settings, "GB_PROVIDER", "google")
     r = client.post("/api/gbleads/campaigns", json={
         "campaign_name": "X", "keywords": ["copper"],
         "countries": ["Australia"], "cities": ["Sydney"],

@@ -22,6 +22,7 @@ from app.models_gbleads import (SearchCampaign, BusinessLead, LeadEvidence,
                                 GBJob)
 from app.schemas import GBCampaignCreate, GBLeadUpdate, GBEnrichRequest
 from app import gbleads_jobs
+from app.google_places import provider_name
 
 router = APIRouter(prefix="/api/gbleads", tags=["gbleads"])
 
@@ -49,12 +50,17 @@ def create_campaign(payload: GBCampaignCreate,
     used = gbleads_jobs.api_used_today(db, user.id)
     if used >= settings.GB_DAILY_API_CALLS:
         raise HTTPException(status_code=429, detail=(
-            f"Daily Google request budget reached "
+            f"Daily search API request budget reached "
             f"({settings.GB_DAILY_API_CALLS}/day) — try tomorrow"))
-    if not settings.GOOGLE_MAPS_API_KEY:
+    # auto/openstreetmap modes always have a provider (free OSM fallback);
+    # only an explicitly Google-only setup requires the key up front.
+    if (settings.GB_PROVIDER or "auto").strip().lower() == "google" \
+            and not settings.GOOGLE_MAPS_API_KEY:
         raise HTTPException(status_code=400, detail=(
-            "GOOGLE_MAPS_API_KEY is not configured on the server — add a "
-            "Places API (New) key (Settings → Google Business Lead Finder)"))
+            "GB_PROVIDER=google but GOOGLE_MAPS_API_KEY is not configured on "
+            "the server — add a Places API (New) key (Settings → Google "
+            "Business Lead Finder) or set GB_PROVIDER=auto to use the free "
+            "OpenStreetMap provider"))
 
     c = SearchCampaign(
         user_id=user.id,
@@ -553,12 +559,33 @@ def gb_settings(db: Session = Depends(get_db),
     cost = db.query(func.coalesce(
         func.sum(SearchCampaign.estimated_cost_usd), 0.0)).filter(
         SearchCampaign.user_id == user.id).scalar() or 0.0
+    pname = provider_name()
+    google_cfg = bool(settings.GOOGLE_MAPS_API_KEY)
+    if pname == "openstreetmap":
+        note = ("Using the free OpenStreetMap provider (Nominatim + "
+                "Overpass): no key, no billing, but sparse coverage and no "
+                "ratings/reviews. For Google-quality data set "
+                "GOOGLE_MAPS_API_KEY in backend/.env, enable \"Places API "
+                "(New)\" in Google Cloud, link billing, and restart. The key "
+                "never leaves the server.")
+    else:
+        note = ("Google Places API key is loaded from the server .env — "
+                "restrict it to \"Places API (New)\" in Google Cloud and set "
+                "a daily quota. The key never leaves the server. Set "
+                "GB_PROVIDER=openstreetmap to use the free OSM provider "
+                "instead.")
     return {
+        "provider": {
+            "name": pname,
+            "free": pname != "google_places",
+            "google_configured": google_cfg,
+        },
         "google_places": {
-            "configured": bool(settings.GOOGLE_MAPS_API_KEY),
-            "provider": "google_places",
+            "configured": google_cfg,
+            "provider": pname,
             "max_results_per_search": settings.GB_MAX_RESULTS_PER_SEARCH,
-            "cost_per_call_usd": settings.GB_COST_PER_CALL_USD,
+            "cost_per_call_usd": (0.0 if pname == "openstreetmap"
+                                  else settings.GB_COST_PER_CALL_USD),
             "calls_used_today": used_today,
             "daily_call_budget": settings.GB_DAILY_API_CALLS,
             "search_timeout_seconds": settings.GB_SEARCH_TIMEOUT,
@@ -576,8 +603,5 @@ def gb_settings(db: Session = Depends(get_db),
             "api_calls_total": api_calls,
             "estimated_cost_total_usd": round(float(cost), 4),
         },
-        "note": ("Set GOOGLE_MAPS_API_KEY in backend/.env, enable "
-                 "\"Places API (New)\" and \"Place Details (New)\" in Google "
-                 "Cloud, restrict the key to those APIs, and set a daily "
-                 "quota. The key never leaves the server."),
+        "note": note,
     }

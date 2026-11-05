@@ -71,7 +71,7 @@ class BusinessLead(Base):
     website = Column(String(2048), nullable=True)
     website_domain = Column(String(255), nullable=True, index=True)  # dedup key 2
     phone = Column(String(50), nullable=True)
-    email = Column(String(255), nullable=True)         # only ever from the official site
+    email = Column(String(255), nullable=True)         # published on the official site or OSM record (evidence rows document the source)
     country = Column(String(100), nullable=True, index=True)
     state = Column(String(100), nullable=True)
     city = Column(String(100), nullable=True, index=True)

@@ -37,6 +37,7 @@ type GBJob = {
   finished_at: string | null;
 };
 type GBCfg = {
+  provider: { name: string; free: boolean; google_configured: boolean };
   google_places: { configured: boolean; max_results_per_search: number;
     cost_per_call_usd: number; calls_used_today: number;
     daily_call_budget: number };
@@ -280,7 +281,11 @@ export default function GBLeads() {
     lf.sort === col ? (lf.order === 'desc' ? ' ↓' : ' ↑') : '';
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const notConfigured = cfg && !cfg.google_places.configured;
+  // only an explicit GB_PROVIDER=google setup without a key is blocking;
+  // auto mode falls back to the free OpenStreetMap provider
+  const notConfigured = cfg && cfg.provider.name === 'google_places'
+    && !cfg.google_places.configured;
+  const osmMode = cfg && cfg.provider.name === 'openstreetmap';
 
   // ---------------------------------------------------------------- render
   return (
@@ -291,14 +296,15 @@ export default function GBLeads() {
             <Building2 className="h-6 w-6" /> Google Business Lead Finder
           </h1>
           <p className="text-sm text-gray-500">
-            Discover businesses by keyword and location via Google Places API (New),
+            Discover businesses by keyword and location
+            {osmMode ? ' via free OpenStreetMap data' : ' via Google Places API (New)'},
             then enrich their official websites for published contact details.
           </p>
         </div>
         <div className="flex items-center gap-2 text-sm text-gray-500">
           <span>
             {cfg
-              ? `${cfg.google_places.calls_used_today}/${cfg.google_places.daily_call_budget} Google calls today`
+              ? `${cfg.google_places.calls_used_today}/${cfg.google_places.daily_call_budget} API calls today`
               : '…'}
           </span>
           <button className="btn-secondary text-sm" onClick={() => { loadCfg(); loadCampaigns(); loadJobs(); loadLeads(); }}>
@@ -312,8 +318,19 @@ export default function GBLeads() {
           <strong>Google Places API not configured.</strong> Add{' '}
           <code className="rounded bg-amber-100 px-1">GOOGLE_MAPS_API_KEY</code> to{' '}
           <code className="rounded bg-amber-100 px-1">backend/.env</code>, enable
-          “Places API (New)” and “Place Details (New)” in Google Cloud, then restart
-          the backend. Searches stay disabled until then.
+          “Places API (New)” in Google Cloud, then restart the backend — or set{' '}
+          <code className="rounded bg-amber-100 px-1">GB_PROVIDER=auto</code> to
+          use the free OpenStreetMap provider instead. Searches stay disabled until then.
+        </div>
+      )}
+      {osmMode && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+          <strong>Free OpenStreetMap mode.</strong> No API key or billing —
+          but coverage is sparse (many businesses have no website, phone, or
+          rating) and ratings/reviews are not available. Add{' '}
+          <code className="rounded bg-blue-100 px-1">GOOGLE_MAPS_API_KEY</code>{' '}
+          to <code className="rounded bg-blue-100 px-1">backend/.env</code> for
+          Google-quality data (≈$0.035/request, first 1,000 free each month).
         </div>
       )}
       {err && <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{err}</div>}
@@ -408,7 +425,9 @@ export default function GBLeads() {
             {busy ? 'Starting…' : 'Run search'}
           </button>
           <span className="text-xs text-gray-500">
-            ≈{cfg?.google_places.cost_per_call_usd ?? 0.035} USD per Google request ·
+            {cfg?.provider.free
+              ? 'Free OpenStreetMap data · $0 API cost'
+              : `≈${cfg?.google_places.cost_per_call_usd ?? 0.035} USD per Google request ·`}{' '}
             daily budget {cfg?.google_places.daily_call_budget ?? '…'} calls
           </span>
         </div>
@@ -470,7 +489,7 @@ export default function GBLeads() {
                   <span>{c.total_enriched} enriched</span>
                   <span>{c.duplicate_count} duplicates skipped</span>
                   <span>{c.total_skipped} filtered out</span>
-                  <span>{c.api_calls} Google calls ({c.api_errors} errors)</span>
+                  <span>{c.api_calls} API calls ({c.api_errors} errors)</span>
                   <span>${(c.estimated_cost_usd || 0).toFixed(3)} est.</span>
                 </div>
                 {c.error && (
@@ -692,7 +711,9 @@ export default function GBLeads() {
                       )}
                       {l.google_maps_url && (
                         <a href={l.google_maps_url} target="_blank" rel="noreferrer"
-                          className="text-gray-500 hover:text-gray-700" title="Open Google Maps">
+                          className="text-gray-500 hover:text-gray-700"
+                      title={l.google_maps_url.includes('openstreetmap')
+                        ? 'Open in OpenStreetMap' : 'Open Google Maps'}>
                           <MapPin className="h-3.5 w-3.5" />
                         </a>
                       )}

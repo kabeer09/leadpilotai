@@ -188,10 +188,17 @@ def parse_search_response(payload: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 class PlacesProvider:
-    """Contract for business-discovery providers (Google now, others later)."""
+    """Contract for business-discovery providers (Google, OpenStreetMap)."""
     name = "base"
+    # Human phrase used in match reasons, e.g. 'Found via Google search: …'
+    search_label = "search"
+    # Estimated cost per HTTP request (0.0 = free provider)
+    cost_per_call_usd = 0.0
 
-    def search(self, query: str, max_results: int = 20) -> list[dict]:
+    def search(self, query: str, max_results: int = 20,
+               context: dict | None = None) -> list[dict]:
+        """context carries the structured query ({keyword, country, state,
+        city}) for providers that cannot search free text directly."""
         raise NotImplementedError
 
     def details(self, place_id: str) -> dict | None:
@@ -200,6 +207,11 @@ class PlacesProvider:
 
 class GooglePlacesProvider(PlacesProvider):
     name = "google_places"
+    search_label = "Google search"
+
+    @property
+    def cost_per_call_usd(self) -> float:
+        return settings.GB_COST_PER_CALL_USD
 
     def __init__(self, api_key: str | None = None,
                  timeout: float | None = None,
@@ -285,9 +297,11 @@ class GooglePlacesProvider(PlacesProvider):
         raise last_err or PlacesAPIError("unknown Google Places failure")
 
     # -- contract ----------------------------------------------------------
-    def search(self, query: str, max_results: int = 20) -> list[dict]:
+    def search(self, query: str, max_results: int = 20,
+               context: dict | None = None) -> list[dict]:
         """Text Search (New) with pagination (20/page, Google allows 3 pages
-        => 60 max). Returns normalized place dicts."""
+        => 60 max). Returns normalized place dicts. `context` is unused —
+        Google searches free text directly."""
         cap = max(1, min(max_results, settings.GB_MAX_RESULTS_PER_SEARCH))
         out: list[dict] = []
         page_token: str | None = None
@@ -318,6 +332,22 @@ class GooglePlacesProvider(PlacesProvider):
         return parse_place(payload)
 
 
-def get_places_provider() -> GooglePlacesProvider:
-    """Factory: swap for another provider here when one is added."""
+def provider_name() -> str:
+    """Which discovery provider is active (never exposes config secrets).
+
+    auto -> Google Places when a key exists, else the free OSM provider.
+    """
+    mode = (settings.GB_PROVIDER or "auto").strip().lower()
+    if mode == "openstreetmap":
+        return "openstreetmap"
+    if mode == "google":
+        return "google_places"
+    return "google_places" if settings.GOOGLE_MAPS_API_KEY else "openstreetmap"
+
+
+def get_places_provider() -> PlacesProvider:
+    """Factory: Google Places when configured, else the free OSM provider."""
+    if provider_name() == "openstreetmap":
+        from app.osm_places import OverpassProvider  # lazy: avoid import cycle
+        return OverpassProvider()
     return GooglePlacesProvider()

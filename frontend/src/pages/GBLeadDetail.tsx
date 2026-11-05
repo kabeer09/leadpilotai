@@ -146,7 +146,8 @@ export default function GBLeadDetail() {
           )}
           {lead.google_maps_url && (
             <a className="btn-secondary text-sm" href={lead.google_maps_url} target="_blank" rel="noreferrer">
-              <MapPin className="mr-1 h-4 w-4" /> Google Maps
+              <MapPin className="mr-1 h-4 w-4" />
+              {lead.google_maps_url.includes('openstreetmap') ? 'OpenStreetMap' : 'Google Maps'}
             </a>
           )}
         </span>
