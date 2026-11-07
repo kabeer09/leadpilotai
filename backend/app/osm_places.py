@@ -52,6 +52,14 @@ _STOPWORDS = {"in", "of", "the", "and", "for", "near", "a", "an", "at",
 _MISSING = object()      # bbox-cache miss sentinel
 _FAILED = object()       # bbox-cache "resolution failed" sentinel
 
+# Trailing generic retail nouns that never change which curated category a
+# phrase refers to: "kitchenware stores" is the same retail category as
+# "kitchenware". Only these literal words are ever stripped (never a guessed
+# synonym) before falling back to the name/brand regex.
+_GENERIC_RETAIL_NOUNS = {"store", "stores", "shop", "shops", "centre",
+                         "center", "supplier", "suppliers", "seller",
+                         "sellers", "retailer", "retailers"}
+
 # Curated keyword -> OSM `shop` values. OSM's real strength is its category
 # tags, not names: "Super Housewares" is a perfect cookware lead even though
 # its name never says "cookware". The map is deliberately small and curated
@@ -97,8 +105,21 @@ def mapped_categories(keyword: str | None) -> tuple[str, ...]:
     """OSM shop values this keyword maps to via the curated map.
 
     Empty tuple when unmapped — the query stays a name/brand search.
+    The full phrase is tried first, then trailing generic retail nouns are
+    dropped one at a time ("kitchenware stores" -> "kitchenware"). Every
+    hit is still an exact curated entry — never a guessed equivalence.
     """
-    return KEYWORD_CATEGORY_MAP.get(_norm_kw(keyword), ())
+    kw = _norm_kw(keyword)
+    cats = KEYWORD_CATEGORY_MAP.get(kw, ())
+    if cats:
+        return cats
+    words = kw.split()
+    while len(words) > 1 and words[-1] in _GENERIC_RETAIL_NOUNS:
+        words.pop()
+        cats = KEYWORD_CATEGORY_MAP.get(" ".join(words), ())
+        if cats:
+            return cats
+    return ()
 
 
 def category_tag_hits(keywords: list[str] | None,

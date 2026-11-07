@@ -130,6 +130,7 @@ export const gbListLeads = (p: Record<string, string | number | boolean>) =>
 export const gbGetLead = (id: number) => api.get(`/gbleads/leads/${id}`).then((r) => r.data);
 export const gbUpdateLead = (id: number, d: object) => api.patch(`/gbleads/leads/${id}`, d).then((r) => r.data);
 export const gbEnrich = (d: object) => api.post('/gbleads/enrich', d).then((r) => r.data);
+export const gbSaveToCompanies = (d: object) => api.post('/gbleads/save-to-companies', d).then((r) => r.data);
 export const gbListJobs = () => api.get('/gbleads/jobs').then((r) => r.data);
 export const gbCancelJob = (id: number) => api.post(`/gbleads/jobs/${id}/cancel`).then((r) => r.data);
 export const gbRetryJob = (id: number) => api.post(`/gbleads/jobs/${id}/retry`).then((r) => r.data);

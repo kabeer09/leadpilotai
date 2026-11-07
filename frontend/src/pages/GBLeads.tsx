@@ -7,7 +7,7 @@ import {
 import {
   gbCreateCampaign, gbListCampaigns, gbCancelCampaign, gbPauseCampaign,
   gbResumeCampaign, gbListLeads, gbUpdateLead, gbEnrich, gbListJobs,
-  gbCancelJob, gbRetryJob, gbSettings, gbExport,
+  gbCancelJob, gbRetryJob, gbSettings, gbExport, gbSaveToCompanies,
 } from '../lib/api';
 
 // ---------------------------------------------------------------- types
@@ -241,6 +241,17 @@ export default function GBLeads() {
       flash(`Enrichment queued for ${ids.length} lead(s).`);
       setSelected([]);
       loadJobs();
+    } catch (e) { setErr(errText(e)); }
+    finally { setBusy(false); }
+  };
+
+  const saveCampaignToCompanies = async (id: number) => {
+    setErr(''); setBusy(true);
+    try {
+      const r = await gbSaveToCompanies({ campaign_id: id });
+      flash(`Saved ${r.synced} of ${r.requested} lead(s) to Companies`
+        + (r.errors?.length ? ` (${r.errors.length} error(s))` : ''));
+      if (r.errors?.length) setErr(r.errors.join('; '));
     } catch (e) { setErr(errText(e)); }
     finally { setBusy(false); }
   };
@@ -485,6 +496,13 @@ export default function GBLeads() {
                       onClick={() => { setFilter({ campaign_id: c.id }); }}>
                       View leads
                     </button>
+                    {c.status === 'COMPLETED' && c.total_discovered > 0 && (
+                      <button className="btn-secondary px-2 py-1 text-xs"
+                        disabled={busy}
+                        onClick={() => saveCampaignToCompanies(c.id)}>
+                        <Building2 className="h-3 w-3" /> Save to Companies
+                      </button>
+                    )}
                   </span>
                 </div>
                 <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-gray-100">

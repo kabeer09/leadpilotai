@@ -192,6 +192,29 @@ def test_mapped_categories_is_curated_and_normalized():
     assert mapped_categories("  Cookware. ") == ("houseware", "kitchen")
     assert mapped_categories("copper bottles") == ()
     assert mapped_categories(None) == ()
+    # trailing generic retail nouns are stripped before the lookup, but the
+    # hit is still an exact curated entry ("kitchenware stores" = the
+    # "kitchenware" category, not a guessed equivalence)
+    assert mapped_categories("kitchenware stores") == ("houseware", "kitchen")
+    assert mapped_categories("Kitchenware Stores") == ("houseware", "kitchen")
+    assert mapped_categories("furniture shops") == ("furniture",)
+    # full-key entries win before any stripping ("garden centre" is itself
+    # a curated key)
+    assert mapped_categories("garden centre") == ("garden_centre",)
+    # stripping never invents a mapping: no curated entry remains -> ()
+    assert mapped_categories("copper bottles store") == ()
+    assert mapped_categories("kitchen utensils") == ()
+
+
+def test_phrase_with_generic_noun_builds_category_query():
+    # "kitchenware stores" now gets the shop-category clauses, not just
+    # the name regex (Romford had no place *named* "kitchenware store")
+    ql = build_overpass_query("kitchenware stores", BBOX, limit=50)
+    assert '["shop"~"' in ql
+    assert "houseware" in ql and "kitchen" in ql
+    # unmapped phrases keep the honest name-only fallback
+    ql2 = build_overpass_query("kitchen utensils", BBOX, limit=50)
+    assert '["shop"~"' not in ql2
 
 
 def test_category_tag_hits_matches_primary_type_segment():

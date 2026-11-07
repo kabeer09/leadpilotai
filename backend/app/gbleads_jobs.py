@@ -26,6 +26,7 @@ from app.google_places import (PlacesAPIError, PlacesConfigError,
 from app.gb_scoring import (score_relevance, classify_business_type,
                             normalize_domain, dedup_key_name_city)
 from app.gb_enricher import enrich_lead, _add_evidence
+from app.gb_to_companies import sync_lead_to_company
 from app.osm_places import category_tag_hits
 
 logger = logging.getLogger(__name__)
@@ -306,6 +307,14 @@ def run_search(campaign_id: int) -> None:
                 if nkey:
                     names_seen.add(nkey)
                 c.total_discovered += 1
+                # mirror into the CRM Companies list — same crawled facts,
+                # one row per business. Failure here must never fail the
+                # search itself (the lead is already durable above).
+                try:
+                    sync_lead_to_company(db, lead)
+                except Exception:  # noqa: BLE001 — job boundary
+                    logger.exception("gb lead %s -> companies sync failed",
+                                     lead.id)
 
             db.commit()  # incremental: every finished query is durable
 

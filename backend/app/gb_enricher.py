@@ -28,6 +28,7 @@ from app.whatsapp import phone_e164
 from app.gb_scoring import (score_relevance, classify_business_type,
                             normalize_domain)
 from app.osm_places import category_tag_hits
+from app.gb_to_companies import sync_lead_to_company
 
 logger = logging.getLogger(__name__)
 
@@ -376,6 +377,13 @@ def enrich_lead(lead: BusinessLead, db, user_id: int,
             evidence_texts.append((page["title"], src))
         if page["description"]:
             evidence_texts.append((page["description"], src))
+            if not lead.business_description:
+                # fill-only: the listing had no editorial description, so
+                # the site's own meta description becomes the sourced
+                # fallback (evidence row documents the exact page)
+                lead.business_description = page["description"][:1000]
+                _add_evidence(db, lead, "description", page["description"],
+                              src, "meta_description", CONF["meta_description"])
         if page["text"]:
             evidence_texts.append((page["text"], src))
             # products/services snippet as its own evidence field
@@ -465,6 +473,13 @@ def enrich_lead(lead: BusinessLead, db, user_id: int,
 
     lead.enrichment_status = "ENRICHED"
     lead.enriched_at = datetime.utcnow()
+    # mirror the enriched lead into the CRM Companies list — the website
+    # crawl may have added emails/phones/socials since discovery, so the
+    # Companies row gains those facts too (fill-only, evidence-sourced).
+    try:
+        sync_lead_to_company(db, lead)
+    except Exception:  # noqa: BLE001 — CRM mirror must not fail enrichment
+        logger.exception("gb lead %s -> companies sync failed", lead.id)
     db.commit()
     return res
 

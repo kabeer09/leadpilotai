@@ -22,6 +22,7 @@ from app.models_gbleads import (SearchCampaign, BusinessLead, LeadEvidence,
                                 GBJob)
 from app.schemas import GBCampaignCreate, GBLeadUpdate, GBEnrichRequest
 from app import gbleads_jobs
+from app.gb_to_companies import sync_lead_to_company
 from app.google_places import provider_name
 
 router = APIRouter(prefix="/api/gbleads", tags=["gbleads"])
@@ -367,6 +368,50 @@ def start_enrichment(payload: GBEnrichRequest,
     db.commit()
     gbleads_jobs.start_enrich(job.id)
     return _job_out(job)
+
+
+@router.post("/save-to-companies",
+             dependencies=[Depends(rate_limit("gblead", settings.RATE_SENSITIVE_PER_MIN))])
+def save_to_companies(payload: GBEnrichRequest,
+                      db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """Copy crawled lead facts into the CRM Companies list (idempotent).
+
+    Same sync the search/enrich pipelines run automatically — this endpoint
+    backfills leads that were crawled before the sync existed. Every value
+    comes from the stored lead + its evidence rows; nothing is guessed and
+    existing Company/Contact values are never overwritten (fill-only).
+    """
+    if not payload.lead_ids and not payload.campaign_id:
+        raise HTTPException(status_code=422,
+                            detail="lead_ids or campaign_id required")
+    if payload.campaign_id:
+        _get_campaign(db, user, payload.campaign_id)  # tenant check
+    if payload.lead_ids:
+        owned = db.query(func.count(BusinessLead.id)).filter(
+            BusinessLead.user_id == user.id,
+            BusinessLead.id.in_(payload.lead_ids)).scalar() or 0
+        if owned != len(set(payload.lead_ids)):
+            raise HTTPException(status_code=404,
+                                detail="Some leads not found in your account")
+    q = db.query(BusinessLead).filter(BusinessLead.user_id == user.id)
+    if payload.campaign_id:
+        q = q.filter(BusinessLead.campaign_id == payload.campaign_id)
+    if payload.lead_ids:
+        q = q.filter(BusinessLead.id.in_(payload.lead_ids))
+    leads = q.all()
+    synced, errors = 0, []
+    for l in leads:
+        try:
+            sync_lead_to_company(db, l)
+            synced += 1
+        except Exception as e:  # noqa: BLE001 — report honestly, keep going
+            errors.append(f"lead {l.id}: {e}")
+    db.commit()
+    audit(db, user.id, "gb_save_to_companies", "gb_lead", None,
+          f"synced={synced} errors={len(errors)} campaign={payload.campaign_id}")
+    db.commit()
+    return {"requested": len(leads), "synced": synced, "errors": errors}
 
 
 def _job_out(j: GBJob) -> dict:
