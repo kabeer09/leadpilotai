@@ -94,6 +94,20 @@ class Settings(BaseSettings):
     WHATSAPP_TEMPLATE_VARS: str = "company"
     DAILY_WHATSAPP_LIMIT: int = 1000
 
+    # --- Global trade intelligence (UN Comtrade) ---
+    # un_comtrade = real UN Comtrade data (public preview needs no key);
+    # none = module disabled (endpoints answer an honest 503, never fake 0s).
+    TRADE_PROVIDER: str = "un_comtrade"
+    # Optional subscription key for the paid /data/v1/get endpoint.
+    # Stays server-side; empty = free public preview (rate-limited, 500
+    # records/call, one period/call).
+    UN_COMTRADE_API_KEY: str = ""
+    TRADE_TIMEOUT: float = 30.0
+    TRADE_MAX_RETRIES: int = 3          # backoff on 429/5xx
+    TRADE_MIN_INTERVAL: float = 2.0     # seconds between outbound calls
+    TRADE_CACHE_TTL_HOURS: int = 24     # trade_statistics payload TTL
+    TRADE_REFERENCE_TTL_HOURS: int = 24  # reporters/partners/HS files
+
     @property
     def google_redirect_uri(self) -> str:
         if self.GOOGLE_REDIRECT_URI:
@@ -136,4 +150,15 @@ def startup_warnings() -> list[str]:
         missing.append("GOOGLE_MAPS_API_KEY is empty — Business Lead Finder uses "
                        "the free OpenStreetMap provider (add a Places API (New) "
                        "key for Google-quality data)")
+    if settings.TRADE_PROVIDER.strip().lower() not in (
+            "un_comtrade", "uncomtrade", "un-comtrade", "none", "off", "disabled"):
+        missing.append(
+            f"TRADE_PROVIDER='{settings.TRADE_PROVIDER}' is not a known "
+            "provider (supported: un_comtrade, none)")
+    elif settings.TRADE_PROVIDER.strip().lower() not in ("none", "off", "disabled"):
+        if not settings.UN_COMTRADE_API_KEY:
+            missing.append(
+                "UN_COMTRADE_API_KEY is empty — Global Trade Data uses the "
+                "free UN Comtrade public preview (rate-limited, 500 records/"
+                "call); add a subscription key for the paid endpoint")
     return missing

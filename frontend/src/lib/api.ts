@@ -140,6 +140,24 @@ export const gbSettings = () => api.get('/gbleads/settings').then((r) => r.data)
 export const gbExport = (p: Record<string, string | number | boolean>) =>
   api.get('/gbleads/export', { params: p, responseType: 'blob' }).then((r) => r.data as Blob);
 
+// Global Trade Intelligence (UN Comtrade — aggregated statistics, not shipments)
+export const tradeSearch = (p: Record<string, string | number>) =>
+  api.get('/trade/search', { params: p }).then((r) => r.data);
+export const tradeStatistics = (p: Record<string, string | number>) =>
+  api.get('/trade/statistics', { params: p }).then((r) => r.data);
+export const tradeHsCodes = (p: Record<string, string | number>) =>
+  api.get('/trade/hs-codes', { params: p }).then((r) => r.data);
+export const tradeCountries = () => api.get('/trade/countries').then((r) => r.data);
+export const tradeListSaved = () => api.get('/trade/saved-searches').then((r) => r.data);
+export const tradeSaveSearch = (d: object) =>
+  api.post('/trade/saved-searches', d).then((r) => r.data);
+export const tradeDeleteSaved = (id: number) =>
+  api.delete(`/trade/saved-searches/${id}`).then((r) => r.data);
+export const tradeExport = (p: Record<string, string | number>, format: 'csv' | 'xlsx') =>
+  api.get('/trade/export', { params: { ...p, format }, responseType: 'blob' })
+    .then((r) => r.data as Blob);
+export const dataSources = () => api.get('/data-sources').then((r) => r.data);
+
 // Analytics + health
 export const overview = (days = 30) => api.get('/analytics/overview', { params: { days } }).then((r) => r.data);
 export const trends = (days = 30) => api.get('/analytics/trends', { params: { days } }).then((r) => r.data);

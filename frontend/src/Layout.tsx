@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Building2, Users, Globe, Mail, Activity,
-  CalendarClock, BarChart3, Settings, LogOut, Zap, Search, Plus, Download, MessageCircle, Store,
+  CalendarClock, BarChart3, Settings, LogOut, Zap, Search, Plus, Download, MessageCircle, Store, Globe2,
 } from 'lucide-react';
 import { useState } from 'react';
 import { useAuth } from './auth';
@@ -11,6 +11,7 @@ const menu = [
   { to: '/companies', icon: Building2, label: 'Companies' },
   { to: '/leads', icon: Users, label: 'Leads' },
   { to: '/business-leads', icon: Store, label: 'Business Leads' },
+  { to: '/trade', icon: Globe2, label: 'Global Trade Data' },
   { to: '/crawling', icon: Globe, label: 'Website Crawling' },
   { to: '/campaigns', icon: Mail, label: 'Email Campaigns' },
   { to: '/sources', icon: Globe, label: 'Trade Fair Sources' },
