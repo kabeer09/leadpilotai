@@ -6,13 +6,16 @@ import {
 } from 'recharts';
 import {
   Search, Save, Trash2, Download, RefreshCw, Database,
-  AlertTriangle, Building2, Info,
+  AlertTriangle, Building2, Info, Scale, Package, Globe,
 } from 'lucide-react';
 import {
   tradeSearch, tradeStatistics, tradeHsCodes, tradeCountries,
   tradeListSaved, tradeSaveSearch, tradeDeleteSaved, tradeExport,
   dataSources,
 } from '../lib/api';
+import CompetitorsTab from './trade/CompetitorsTab';
+import HsIntelTab from './trade/HsIntelTab';
+import CompareTab from './trade/CompareTab';
 
 const errText = (e: unknown) =>
   (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
@@ -87,6 +90,7 @@ export default function GlobalTrade() {
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState<'search' | 'competitors' | 'hs' | 'compare'>('search');
 
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(''), 4000); };
 
@@ -207,17 +211,41 @@ export default function GlobalTrade() {
           </p>
         </div>
         <div className="flex gap-2">
-          <button className="btn-secondary" onClick={() => download('csv')}
-                  disabled={busy}>
-            <Download className="mr-1.5 h-4 w-4" /> CSV
-          </button>
-          <button className="btn-secondary" onClick={() => download('xlsx')}
-                  disabled={busy}>
-            <Download className="mr-1.5 h-4 w-4" /> Excel
-          </button>
+          {tab === 'search' && (
+            <>
+              <button className="btn-secondary" onClick={() => download('csv')}
+                      disabled={busy}>
+                <Download className="mr-1.5 h-4 w-4" /> CSV
+              </button>
+              <button className="btn-secondary" onClick={() => download('xlsx')}
+                      disabled={busy}>
+                <Download className="mr-1.5 h-4 w-4" /> Excel
+              </button>
+            </>
+          )}
         </div>
       </div>
 
+      {/* ---- tab bar ---- */}
+      <div className="flex gap-1 overflow-x-auto border-b border-gray-200">
+        {([
+          ['search', 'Search', Search],
+          ['competitors', 'Competitor analysis', Globe],
+          ['hs', 'HS intelligence', Package],
+          ['compare', 'Country compare', Scale],
+        ] as const).map(([key, label, Icon]) => (
+          <button key={key}
+                  onClick={() => setTab(key)}
+                  className={`-mb-px flex items-center gap-1.5 whitespace-nowrap border-b-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+                    tab === key
+                      ? 'border-primary-600 text-primary-700'
+                      : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+            <Icon className="h-4 w-4" /> {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'search' && (<>
       {msg && <div className="rounded-xl bg-green-50 px-4 py-2 text-sm text-green-700">{msg}</div>}
       {err && (
         <div className="flex items-start gap-2 rounded-xl bg-red-50 px-4 py-2 text-sm text-red-700">
@@ -457,6 +485,11 @@ export default function GlobalTrade() {
           </ResponsiveContainer>
         </div>
       )}
+      </>)}
+
+      {tab === 'competitors' && <CompetitorsTab />}
+      {tab === 'hs' && <HsIntelTab />}
+      {tab === 'compare' && <CompareTab />}
 
       {/* ---- data sources ---- */}
       <div className="card">

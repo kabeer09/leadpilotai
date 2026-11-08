@@ -29,6 +29,7 @@ from app.database import get_db
 from app.deps import get_current_user, rate_limit, audit
 from app.models import User
 from app.models_trade import SavedSearch, TradeStatistic, DataProvider
+from app import trade_intel
 from app.trade_providers import (
     get_trade_provider, TradeError, TradeConfigError, TradeQuotaError,
     TradeAPIError, expand_periods, normalize_flow, normalize_cmd,
@@ -217,18 +218,14 @@ def trade_search(
     return payload
 
 
-@router.get("/trade/statistics")
-def trade_statistics(
-        reporter_code: int = Query(..., gt=0),
-        period_from: str = Query("2019"),
-        period_to: str = Query("2023"),
-        flow: str = Query("both"),
-        cmd_code: str | None = Query(None),
-        partner_code: int | None = Query(None, ge=0),
-        db: Session = Depends(get_db),
-        user: User = Depends(get_current_user)):
-    params = _build_params(reporter_code, period_from, period_to, flow,
-                           cmd_code, partner_code, MAX_RECORDS)
+def _run_statistics(db: Session, params: dict) -> dict:
+    """Fetch (or reuse cache) a decorated statistics payload.
+
+    Shared by /trade/statistics and /trade/compare (cache is per
+    reporter+params, so comparison countries reuse warmed series).
+    On quota/API failure: serve cache if present (flagged stale), else
+    raise the typed error — never a fake empty series.
+    """
     key = _cache_key("statistics", params)
     cached = _cache_get(db, key)
     if _fresh(cached):
@@ -264,6 +261,22 @@ def trade_statistics(
     }
     _cache_put(db, key, params, payload, len(payload["series"]), status=200)
     _record_source(db, ok=True)
+    return payload
+
+
+@router.get("/trade/statistics")
+def trade_statistics(
+        reporter_code: int = Query(..., gt=0),
+        period_from: str = Query("2019"),
+        period_to: str = Query("2023"),
+        flow: str = Query("both"),
+        cmd_code: str | None = Query(None),
+        partner_code: int | None = Query(None, ge=0),
+        db: Session = Depends(get_db),
+        user: User = Depends(get_current_user)):
+    params = _build_params(reporter_code, period_from, period_to, flow,
+                           cmd_code, partner_code, MAX_RECORDS)
+    payload = _run_statistics(db, params)
     payload["params"] = {k: v for k, v in params.items() if k != "periods"}
     return payload
 
@@ -318,6 +331,259 @@ def trade_countries(user: User = Depends(get_current_user)):
         return provider.countries()
     except TradeError as e:
         raise _err_http(e)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: competitor analysis, HS intelligence, country comparison
+# ---------------------------------------------------------------------------
+
+def _reporter_name(provider, code: int) -> str:
+    """Resolve a reporter code to its official name (never invented —
+    degrades to the numeric code when the reference file is unavailable)."""
+    try:
+        row = provider.reporter_map().get(int(code)) or {}
+    except Exception:
+        row = {}
+    return (row.get("reporterDesc") or row.get("text") or str(code))
+
+
+def _parse_reporter_codes(raw: str) -> list[int]:
+    """Comma-separated reporter codes -> unique positive ints, order kept."""
+    codes: list[int] = []
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not part.isdigit() or int(part) <= 0:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid reporter code '{part}' — use numeric UN "
+                       "codes separated by commas (e.g. 826,276,380)")
+        c = int(part)
+        if c not in codes:
+            codes.append(c)
+    return codes
+
+
+@router.get("/trade/competitors")
+def trade_competitors(
+        destination_code: int = Query(
+            ..., gt=0,
+            description="Import market (UN reporter code of the "
+                        "destination country)"),
+        cmd_code: str | None = Query(
+            None, description="HS product code to compare supply of"),
+        period: str = Query("2023", description="Single year (4 digits)"),
+        top_n: int = Query(15, ge=1, le=100),
+        db: Session = Depends(get_db),
+        user: User = Depends(get_current_user)):
+    """Who supplies a market: destination imports ranked by partner country.
+
+    Aggregated country-level statistics only — UN Comtrade does not expose
+    company identities, and this payload says so.
+    """
+    params = _build_params(destination_code, period, period, "M", cmd_code,
+                           None, MAX_RECORDS)  # destination's imports, all partners
+    payload = _run_search(db, params)
+
+    ranked = trade_intel.rank_suppliers(payload.get("rows") or [],
+                                        top_n=top_n)
+    provider = get_trade_provider()  # config error -> honest 503
+    return {
+        "record_type": "aggregated_statistics",
+        "source": {
+            **(payload.get("source") or {}),
+            "destination_code": destination_code,
+            "destination_name": _reporter_name(provider, destination_code),
+        },
+        "stale": bool(payload.get("stale")),
+        "stale_reason": payload.get("stale_reason"),
+        "cached": bool(payload.get("cached")),
+        "fetched_at": payload.get("fetched_at"),
+        "params": {"destination_code": destination_code,
+                   "cmd_code": params.get("cmd_code"),
+                   "period": period, "flow": "M", "top_n": top_n},
+        **ranked,
+        "note": ("Country-level export sources for this market — trade "
+                 "statistics do not identify individual companies. Use "
+                 "Buyer Discovery for company-level leads."),
+    }
+
+
+@router.get("/trade/hs-intel")
+def trade_hs_intel(
+        cmd_code: str = Query(..., description="HS code, e.g. 7113"),
+        reporter_code: int | None = Query(
+            None, gt=0, description="Include this country's trade trend "
+                                    "for the code"),
+        period_from: str = Query("2019"),
+        period_to: str = Query("2023"),
+        flow: str = Query("both"),
+        db: Session = Depends(get_db),
+        user: User = Depends(get_current_user)):
+    """HS intelligence: official classification hierarchy (+ optional
+    reporter trade trend for the code).
+
+    Classification comes from the official UN HS reference file — unknown
+    codes are an honest 404, never an invented description.
+    """
+    try:
+        code = normalize_cmd(cmd_code)  # raises TradeConfigError
+    except TradeConfigError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if not code:
+        raise HTTPException(status_code=422,
+                            detail="cmd_code is required (e.g. 7113)")
+    provider = get_trade_provider()  # config error -> honest 503
+    try:
+        # Hierarchy needs the WHOLE reference (parents live above the
+        # exact node); fall back to the exact+children slice when a
+        # provider has no full list — ancestors then degrade honestly.
+        rows_fn = getattr(provider, "hs_rows", None)
+        if callable(rows_fn):
+            nodes = rows_fn()
+        else:
+            nodes = provider.hs_search(code=code)
+    except TradeError as e:
+        raise _err_http(e)
+
+    hierarchy = trade_intel.hs_hierarchy(nodes, code)
+    if hierarchy is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"HS code '{code}' not found in the official UN "
+                   "Comtrade HS classification")
+
+    classification = {
+        "record_type": "reference_data",
+        "source": {"name": "UN Comtrade HS classification",
+                   "url": "https://comtradeapi.un.org/files/v1/app/"
+                          "reference/HS.json",
+                   "disclaimer": ("Official HS classifications — use as "
+                                  "guidance; confirm uncertain codes with a "
+                                  "customs broker.")},
+        **hierarchy,
+    }
+
+    trend = None
+    if reporter_code is not None:
+        params = _build_params(reporter_code, period_from, period_to, flow,
+                               code, None, MAX_RECORDS)
+        trend = _run_statistics(db, params)
+        trend["params"] = {k: v for k, v in params.items()
+                           if k != "periods"}
+
+    return {
+        "record_type": "hs_intelligence",
+        "classification": classification,
+        "trend": trend,
+        "note": ("Hierarchy from the official UN reference; any trade "
+                 "trend block is aggregated statistics for the selected "
+                 "reporter — not shipment records."),
+    }
+
+
+@router.get("/trade/compare")
+def trade_compare(
+        reporter_codes: str = Query(
+            ..., description="2-4 comma-separated UN reporter codes"),
+        period_from: str = Query("2022"),
+        period_to: str = Query("2023"),
+        flow: str = Query("both"),
+        cmd_code: str | None = Query(None),
+        db: Session = Depends(get_db),
+        user: User = Depends(get_current_user)):
+    """Side-by-side country comparison (aggregated annual statistics).
+
+    Each country's series is fetched through the shared statistics cache,
+    so countries/years already queried elsewhere are answered instantly.
+    """
+    codes = _parse_reporter_codes(reporter_codes)
+    if len(codes) < 2:
+        raise HTTPException(status_code=422,
+                            detail="Pick at least 2 countries to compare")
+    if len(codes) > 4:
+        raise HTTPException(status_code=422,
+                            detail="Comparison is limited to 4 countries "
+                                   "per query")
+
+    # Bound the outbound burst: one preview call per (reporter x year).
+    try:
+        periods = expand_periods(period_from, period_to)
+    except TradeConfigError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if len(periods) > 5:
+        raise HTTPException(
+            status_code=422,
+            detail="Comparison is limited to 5 years per query — narrow "
+                   "the range")
+
+    provider = get_trade_provider()  # config error -> honest 503
+
+    countries = []
+    any_stale = False
+    all_cached = True
+    for rc in codes:
+        params = _build_params(rc, period_from, period_to, flow, cmd_code,
+                               None, MAX_RECORDS)
+        p = _run_statistics(db, params)
+        any_stale = any_stale or bool(p.get("stale"))
+        all_cached = all_cached and bool(p.get("cached"))
+        countries.append({
+            "reporter_code": rc,
+            "name": _reporter_name(provider, rc),
+            "series": p.get("series") or [],
+            "total_value": p.get("total_value") or 0.0,
+            "stale": bool(p.get("stale")),
+            "cached": bool(p.get("cached")),
+        })
+
+    # per (period, flow) matrix with shares among the compared countries
+    matrix: dict[tuple[str, str], dict] = {}
+    for c in countries:
+        for s in c["series"]:
+            key = (str(s.get("period") or ""), str(s.get("flow") or ""))
+            cell = matrix.setdefault(key, {"period": key[0], "flow": key[1],
+                                           "values": {}})
+            v = s.get("value")
+            cell["values"][str(c["reporter_code"])] = (
+                float(v) if isinstance(v, (int, float)) else 0.0)
+    rows_out = []
+    for (period, fl), cell in sorted(matrix.items()):
+        total = sum(cell["values"].values())
+        cell["combined"] = round(total, 2)
+        cell["shares"] = {
+            rc: (round(100.0 * v / total, 2) if total > 0 else 0.0)
+            for rc, v in cell["values"].items()}
+        cell["values"] = {rc: round(v, 2)
+                          for rc, v in cell["values"].items()}
+        rows_out.append(cell)
+
+    return {
+        "record_type": "aggregated_statistics",
+        "source": {"name": "UN Comtrade",
+                   "url": "https://comtradeapi.un.org/public/v1/preview/"
+                          "C/A/HS",
+                   "record_type": "aggregated_statistics",
+                   "coverage": ("Annual merchandise trade statistics as "
+                                "reported by countries (HS classification)"),
+                   "periods": periods,
+                   "flow": flow,
+                   "cmd_code": cmd_code,
+                   "disclaimer": ("Aggregated trade statistics — NOT "
+                                  "individual shipment records and NOT "
+                                  "buyer/supplier identities.")},
+        "params": {"reporter_codes": codes, "period_from": period_from,
+                   "period_to": period_to, "flow": flow,
+                   "cmd_code": cmd_code},
+        "countries": countries,
+        "matrix": rows_out,
+        "stale": any_stale,
+        "cached": all_cached and bool(countries),
+        "note": ("Shares are each country's piece of the COMPARED set "
+                 "for that period/flow — not its share of world trade. "
+                 "Aggregated statistics, not company data."),
+    }
 
 
 # ---------------------------------------------------------------------------

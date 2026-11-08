@@ -188,6 +188,13 @@ export const tradeExport = (p: Record<string, string | number>, format: 'csv' | 
   api.get('/trade/export', { params: { ...p, format }, responseType: 'blob' })
     .then((r) => r.data as Blob);
 export const dataSources = () => api.get('/data-sources').then((r) => r.data);
+// Phase 4: competitor analysis, HS intelligence, country comparison
+export const tradeCompetitors = (p: Record<string, string | number>) =>
+  api.get('/trade/competitors', { params: p }).then((r) => r.data);
+export const tradeHsIntel = (p: Record<string, string | number>) =>
+  api.get('/trade/hs-intel', { params: p }).then((r) => r.data);
+export const tradeCompare = (p: Record<string, string | number>) =>
+  api.get('/trade/compare', { params: p }).then((r) => r.data);
 
 // Analytics + health
 export const overview = (days = 30) => api.get('/analytics/overview', { params: { days } }).then((r) => r.data);
