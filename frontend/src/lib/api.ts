@@ -106,8 +106,39 @@ export const importManualUrl = (d: object) => api.post('/import/manual-url', d).
 // Research
 export const researchCompany = (id: number) => api.get('/research/company/' + id).then((r) => r.data);
 export const generateDraft = (id: number, d?: object) => api.post('/research/draft/' + id, d || {}).then((r) => r.data);
-export const listQualified = (minScore = 40) => api.get('/research/qualified', { params: { min_score: minScore } }).then((r) => r.data);
+export const listQualified = (minScore = 40, refresh = false) =>
+  api.get('/research/qualified', { params: { min_score: minScore, refresh } }).then((r) => r.data);
 export const runResearch = (d: object) => api.post('/research/run', d).then((r) => r.data);
+export const researchPickCompanies = (p: Record<string, string | number | boolean>) =>
+  api.get('/research/companies', { params: p }).then((r) => r.data);
+export const researchReport = (id: number) =>
+  api.get(`/research/report/${id}`).then((r) => r.data);
+export const researchReportRefresh = (id: number) =>
+  api.post(`/research/report/${id}/refresh`).then((r) => r.data);
+
+// Buyer/Supplier Discovery (classified over real workspace data)
+export const discoveryBuyers = (p: Record<string, string | number | boolean>) =>
+  api.get('/discovery/buyers', { params: p }).then((r) => r.data);
+export const discoveryExport = (p: Record<string, string | number | boolean>) =>
+  api.get('/discovery/export', { params: p, responseType: 'blob' })
+    .then((r) => r.data as Blob);
+export const discoverySavedList = () =>
+  api.get('/discovery/saved-searches').then((r) => r.data);
+export const discoverySavedCreate = (d: object) =>
+  api.post('/discovery/saved-searches', d).then((r) => r.data);
+export const discoverySavedDelete = (id: number) =>
+  api.delete(`/discovery/saved-searches/${id}`).then((r) => r.data);
+
+// Exhibitor dashboard (extraction status + search + export + launch)
+export const exhibitorsList = (p: Record<string, string | number | boolean>) =>
+  api.get('/exhibitors', { params: p }).then((r) => r.data);
+export const exhibitorsOverview = () =>
+  api.get('/exhibitors/overview').then((r) => r.data);
+export const exhibitorsExport = (p: Record<string, string | number | boolean>) =>
+  api.get('/exhibitors/export', { params: p, responseType: 'blob' })
+    .then((r) => r.data as Blob);
+export const exhibitorsExtract = (d: object) =>
+  api.post('/exhibitors/extract', d).then((r) => r.data);
 
 // Verification
 export const verifyEmail = (d: object) => api.post('/verify/email', d).then((r) => r.data);

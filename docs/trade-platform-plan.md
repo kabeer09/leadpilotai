@@ -112,8 +112,8 @@ All endpoints: JWT auth, rate limits, Pydantic/Query validation, audit on writes
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Inspect, audit, integration plan | ✅ this document |
-| 2 | Adapter architecture + UN Comtrade + trade statistics search + country/HS lookup | 🔄 in progress |
-| 3 | Buyer/supplier discovery, exhibitor extraction improvements, company research | pending |
+| 2 | Adapter architecture + UN Comtrade + trade statistics search + country/HS lookup | ✅ committed (`4edc2c9`) |
+| 3 | Buyer/supplier discovery, exhibitor extraction improvements, company research | ✅ this round — 216/216 tests green, build clean, pages DOM-verified |
 | 4 | Competitor analysis, HS intelligence, country comparison | pending |
 | 5 | AI Trade Analyst, lead scoring, AI research reports | pending |
 | 6 | CRM improvements, email automation, dashboard analytics | pending |

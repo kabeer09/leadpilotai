@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from app.models import Company, Contact, Lead, User
+from app.models_research import ContactEvidence, EvaluationResult
 from app.validation import normalize_email, normalize_phone, filter_valid_emails, pick_best_email
 from app.ssrf import validate_url
 
@@ -32,7 +33,14 @@ def research_company_website(company: Company, db: Session) -> dict:
         "errors": [],
     }
 
-    if not company.website or not company.website.startswith("http"):
+    # Many directory listings store scheme-less URLs (www.example.com) —
+    # normalize to https rather than refusing to research at all.
+    site = (company.website or "").strip()
+    if site and not site.startswith(("http://", "https://")):
+        site = "https://" + site
+    result["website"] = site or company.website
+
+    if not site:
         result["errors"].append("No valid website URL")
         return result
 
@@ -44,7 +52,7 @@ def research_company_website(company: Company, db: Session) -> dict:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }, follow_redirects=True) as client:
         for path in pages_to_check:
-            url = company.website.rstrip("/") + path
+            url = site.rstrip("/") + path
             _, err = validate_url(url)
             if err:
                 result["errors"].append(f"SSRF blocked: {url}")
@@ -225,8 +233,9 @@ def qualify_buyer(company: Company, research: dict) -> dict:
         missing.append("Country not identified")
         country_fit = "unknown"
 
-    # Website quality (max 10 points)
-    if company.website and company.website.startswith("http"):
+    # Website quality (max 10 points) — scheme-less URLs still count as a
+    # website (research normalizes them to https)
+    if company.website and company.website.strip():
         score += 5
         evidence.append("Company website available")
     else:
@@ -523,6 +532,152 @@ def quality_check(company: Company, contacts: list[dict],
     }
 
 
+# ── Persistence: durable evidence + evaluation (research module) ──────────
+
+def persist_research_evidence(db: Session, user_id: int, company_id: int,
+                              research: dict) -> dict:
+    """Store extracted contacts as evidence rows (source_url + extraction
+    method per the honesty contract). Upserts on (user, company, type,
+    normalized value, source_url) so re-runs refresh instead of duplicating.
+    """
+    added = updated = 0
+    now = datetime.utcnow()
+    entries = ([("email", e) for e in research.get("emails", [])] +
+               [("phone", p) for p in research.get("phones", [])] +
+               [("whatsapp", w) for w in research.get("whatsapp_links", [])])
+    for ctype, e in entries:
+        value = (e.get("value") or "").strip()
+        if not value:
+            continue
+        source_url = (e.get("source_url") or research.get("website")
+                      or "")[:2048]
+        row = (db.query(ContactEvidence)
+               .filter(ContactEvidence.user_id == user_id,
+                       ContactEvidence.company_id == company_id,
+                       ContactEvidence.contact_type == ctype,
+                       ContactEvidence.normalized_value == value[:500],
+                       ContactEvidence.source_url == source_url)
+               .first())
+        if row:
+            row.last_observed = now
+            if e.get("confidence") is not None:
+                row.confidence = e.get("confidence")
+            if e.get("extraction_method"):
+                row.extraction_method = e.get("extraction_method")
+            updated += 1
+        else:
+            db.add(ContactEvidence(
+                user_id=user_id, company_id=company_id, contact_type=ctype,
+                raw_value=value[:500], normalized_value=value[:500],
+                source_url=source_url, source_type="company_website",
+                extraction_method=e.get("extraction_method"),
+                confidence=e.get("confidence")))
+            added += 1
+    return {"added": added, "updated": updated}
+
+
+def persist_evaluation(db: Session, user_id: int, company_id: int,
+                       qualification: dict, research: dict | None = None,
+                       qc: dict | None = None,
+                       validated: list | None = None) -> EvaluationResult:
+    """Persist a qualification score + the full result payload.
+
+    Transparent formulas (documented, not invented):
+      contact_completeness = 50(email) + 30(phone) + 20(whatsapp)  [0..100]
+      evidence_quality      = mean contact confidence * 100         [0..100]
+      validation_coverage   = % of validated contacts not UNVERIFIED/NOT_FOUND
+      buyer_fit / overall   = qualify_buyer score                  [0..100]
+    """
+    research = research or {}
+    emails = research.get("emails", [])
+    phones = research.get("phones", [])
+    was = research.get("whatsapp_links", [])
+    completeness = (50 if emails else 0) + (30 if phones else 0) + \
+                   (20 if was else 0)
+    confs = [e.get("confidence") for e in emails + phones + was
+             if isinstance(e.get("confidence"), (int, float))]
+    evidence_quality = (round(sum(confs) / len(confs) * 100, 1)
+                        if confs else 0.0)
+    coverage = None
+    if validated:
+        good = [v for v in validated if v.get("validation_status") not in
+                ("UNVERIFIED", "NOT_FOUND", None)]
+        coverage = round(100.0 * len(good) / len(validated), 1)
+    score = float(qualification.get("score", 0))
+    issues = list((qc or {}).get("issues", []))
+    result = {
+        "buyer_type": qualification.get("buyer_type"),
+        "product_fit": qualification.get("product_fit"),
+        "country_fit": qualification.get("country_fit"),
+        "recommended_next_action": qualification.get(
+            "recommended_next_action"),
+        "missing_evidence": qualification.get("missing_evidence", []),
+        "supporting_snippets": qualification.get("supporting_snippets", []),
+        "evidence_urls": qualification.get("evidence_urls", []),
+        "emails": [e.get("value") for e in emails],
+        "phones": [p.get("value") for p in phones],
+        "whatsapp": [w.get("value") for w in was],
+        "qc_issues": issues,
+    }
+    row = EvaluationResult(
+        user_id=user_id, company_id=company_id,
+        contact_completeness_score=float(completeness),
+        evidence_quality_score=float(evidence_quality),
+        buyer_fit_score=score,
+        validation_coverage=coverage,
+        overall_score=score,
+        issues=json.dumps(issues, ensure_ascii=False),
+        warnings=json.dumps(list((qc or {}).get("warnings", [])),
+                            ensure_ascii=False),
+        result_json=json.dumps(result, ensure_ascii=False))
+    db.add(row)
+    return row
+
+
+def research_and_persist(db: Session, user_id: int,
+                         company: Company) -> dict:
+    """Research a company website, validate + qualify, persist evidence
+    and evaluation. Single entry point used by the pipeline, the
+    single-company endpoint and the report refresh.
+
+    Returns {research, qualification, validated, qc, evidence}.
+    """
+    research = research_company_website(company, db)
+
+    validated: list[dict] = []
+    for e in research.get("emails", []):
+        validated.append(validate_email_contact(
+            e["value"], e.get("source_url", ""),
+            e.get("extraction_method", ""), e.get("confidence", 0.5)))
+    for p in research.get("phones", []):
+        validated.append(validate_phone_contact(
+            p["value"], p.get("source_url", ""),
+            p.get("extraction_method", ""), p.get("confidence", 0.5)))
+    for w in research.get("whatsapp_links", []):
+        vp = validate_phone_contact(
+            w["value"], w.get("source_url", ""),
+            w.get("extraction_method", ""), w.get("confidence", 0.5))
+        vp["contact_type"] = "whatsapp"
+        vp["validation_status"] = "PUBLICLY_LISTED"
+        validated.append(vp)
+
+    qualification = qualify_buyer(company, research)
+    qc = quality_check(company, validated, qualification)
+
+    evidence = persist_research_evidence(db, user_id, company.id, research)
+    persist_evaluation(db, user_id, company.id, qualification,
+                       research=research, qc=qc, validated=validated)
+
+    if research.get("description") and not company.product_summary:
+        company.product_summary = research["description"][:500]
+    if research.get("country") and not company.country:
+        company.country = research["country"]
+    company.last_verified = datetime.utcnow()
+
+    return {"research": research, "qualification": qualification,
+            "validated": validated, "qc": qc, "evidence": evidence}
+
+
 # ── Orchestration Service ─────────────────────────────────────────────────
 
 def run_research_pipeline(db: Session, user_id: int, company_ids: list[int],
@@ -530,7 +685,7 @@ def run_research_pipeline(db: Session, user_id: int, company_ids: list[int],
     """Run the full research pipeline on a list of companies.
 
     Steps:
-    1. Research each company website
+    1. Research each company website (+ persist evidence + evaluation)
     2. Validate contacts
     3. Qualify buyers
     4. Quality control
@@ -554,52 +709,23 @@ def run_research_pipeline(db: Session, user_id: int, company_ids: list[int],
                 results["errors"].append(f"Company {cid} not found")
                 continue
 
-            # Step 1: Research
-            research = research_company_website(company, db)
-
-            # Step 2: Validate contacts
-            validated_contacts = []
-            for e in research.get("emails", []):
-                vc = validate_email_contact(
-                    e["value"], e["source_url"], e["extraction_method"],
-                    e["confidence"])
-                validated_contacts.append(vc)
-            for p in research.get("phones", []):
-                vp = validate_phone_contact(
-                    p["value"], p["source_url"], p["extraction_method"],
-                    p["confidence"])
-                validated_contacts.append(vp)
-            for w in research.get("whatsapp_links", []):
-                vp = validate_phone_contact(
-                    w["value"], w["source_url"], w["extraction_method"],
-                    w["confidence"])
-                vp["contact_type"] = "whatsapp"
-                vp["validation_status"] = "PUBLICLY_LISTED"
-                validated_contacts.append(vp)
+            # Steps 1-4: research, validate, qualify, QC — with durable
+            # evidence + evaluation persistence
+            outcome = research_and_persist(db, user_id, company)
+            research = outcome["research"]
+            qualification = outcome["qualification"]
+            validated_contacts = outcome["validated"]
+            qc = outcome["qc"]
+            db.commit()
 
             results["contacts_found"] += len(validated_contacts)
 
-            # Step 3: Qualify
-            qualification = qualify_buyer(company, research)
-
-            # Step 4: Quality control
-            qc = quality_check(company, validated_contacts, qualification)
-
             # Step 5: Generate draft if qualified and not flagged
-            draft = None
             if qc["passed"] and qualification["score"] >= 40:
-                draft = generate_outreach_draft(company, qualification, research)
+                generate_outreach_draft(company, qualification, research)
                 results["qualified"] += 1
             if qc["flagged_for_review"]:
                 results["flagged"] += 1
-
-            # Save research results to company (extend if needed)
-            if research.get("description") and not company.product_summary:
-                company.product_summary = research["description"][:500]
-            if research.get("country") and not company.country:
-                company.country = research["country"]
-            company.last_verified = datetime.utcnow()
-            db.commit()
 
             results["companies_processed"] += 1
 

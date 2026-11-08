@@ -72,4 +72,5 @@ class EvaluationResult(Base):
     overall_score = Column(Float, nullable=True)  # 0-100
     issues = Column(Text, nullable=True)  # JSON list
     warnings = Column(Text, nullable=True)  # JSON list
+    result_json = Column(Text, nullable=True)  # full qualification payload
     evaluated_at = Column(DateTime, default=datetime.utcnow, nullable=False)

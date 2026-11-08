@@ -1,150 +1,306 @@
-import { useState } from 'react';
-import { Search, Star, Mail, Globe, Phone, AlertTriangle, CheckCircle } from 'lucide-react';
-import { researchCompany, generateDraft } from '../lib/api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import {
+  Search, RefreshCw, Mail, Globe, Phone, AlertTriangle, CheckCircle,
+  FileText, Star, Building2, Link2,
+} from 'lucide-react';
+import {
+  researchPickCompanies, researchReport, researchReportRefresh,
+  generateDraft, listQualified,
+} from '../lib/api';
+
+const errText = (e: unknown) =>
+  (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+  (e as Error)?.message || 'Request failed';
+
+interface Pick { id: number; name: string; country?: string; website?: string;
+  email_count: number; phone_count: number; has_research: boolean;
+  research_score?: number; }
+interface Evidence {
+  id: number; contact_type: string; raw_value: string; source_url: string;
+  extraction_method?: string; confidence?: number;
+  validation_status: string; last_observed: string;
+}
+interface Evaluation {
+  buyer_fit_score?: number; buyer_type?: string; product_fit?: string;
+  country_fit?: string; recommended_next_action?: string;
+  missing_evidence?: string[]; supporting_snippets?: string[];
+  emails?: string[]; phones?: string[];
+  contact_completeness_score?: number; evidence_quality_score?: number;
+  validation_coverage?: number; evaluated_at?: string;
+}
+interface Report {
+  record_type: string; note: string;
+  company: { id: number; name: string; website?: string; country?: string;
+    city?: string; category?: string; hall?: string; booth?: string;
+    fair?: string; product_summary?: string;
+    products: { name?: string }[]; profile_url?: string;
+    last_verified?: string };
+  contacts: { id: number; kind: string; value: string; source_url?: string;
+    verification: string }[];
+  evidence: Evidence[];
+  evaluation: Evaluation | null;
+  research: any; has_research: boolean; refreshed_at?: string;
+}
+interface QualRow { company_id: number; name: string; score: number;
+  buyer_type: string; evaluated_at?: string; }
 
 export default function Research() {
-  const [companyId, setCompanyId] = useState('');
-  const [result, setResult] = useState<any>(null);
+  const [params, setParams] = useSearchParams();
+  const [query, setQuery] = useState('');
+  const [picks, setPicks] = useState<Pick[]>([]);
+  const [report, setReport] = useState<Report | null>(null);
+  const [draft, setDraft] = useState<{ subject: string; body: string } | null>(null);
+  const [qualified, setQualified] = useState<QualRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const initRef = useRef(false);
 
-  const research = async () => {
-    if (!companyId) { setMsg('Enter a company ID.'); return; }
-    setLoading(true);
-    setMsg('');
-    setResult(null);
+  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(''), 4000); };
+
+  const loadReport = useCallback(async (id: number) => {
+    setErr('');
     try {
-      const r = await researchCompany(parseInt(companyId));
-      setResult(r);
-    } catch (e: unknown) {
-      setMsg((e as { response?: { data?: { detail?: string } } }).response?.data?.detail || 'Research failed.');
-    } finally {
-      setLoading(false);
+      const r: Report = await researchReport(id);
+      setReport(r); setDraft(null);
+    } catch (e) { setErr(errText(e)); }
+  }, []);
+
+  // picker search (debounced)
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 1) { setPicks([]); return; }
+    const t = setTimeout(() => {
+      researchPickCompanies({ q, limit: 8 })
+        .then((d) => setPicks(d.items || []))
+        .catch(() => setPicks([]));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  // deep link: /research?company=123 (from discovery / CRM)
+  useEffect(() => {
+    const id = Number(params.get('company'));
+    if (id && !initRef.current) {
+      initRef.current = true;
+      loadReport(id);
     }
+  }, [params, loadReport]);
+
+  // persisted qualified list (fast path, no network)
+  useEffect(() => {
+    listQualified(40).then((d) => setQualified(d.companies || [])).catch(() => {});
+  }, []);
+
+  const refresh = async () => {
+    if (!report) return;
+    setLoading(true); setErr('');
+    try {
+      const r: Report = await researchReportRefresh(report.company.id);
+      setReport(r);
+      flash('Live research complete — evidence + scores saved');
+    } catch (e) { setErr(errText(e)); }
+    finally { setLoading(false); }
   };
 
-  const genDraft = async () => {
-    if (!companyId) return;
-    setLoading(true);
+  const makeDraft = async () => {
+    if (!report) return;
+    setLoading(true); setErr('');
     try {
-      const r = await generateDraft(parseInt(companyId));
-      setResult((prev: any) => ({ ...prev, draft: r.draft }));
-    } catch (e: unknown) {
-      setMsg((e as { response?: { data?: { detail?: string } } }).response?.data?.detail || 'Draft generation failed.');
-    } finally {
-      setLoading(false);
-    }
+      const r = await generateDraft(report.company.id);
+      setDraft(r.draft);
+    } catch (e) { setErr(errText(e)); }
+    finally { setLoading(false); }
   };
 
-  const qual = result?.qualification;
-  const res = result?.research;
+  const qual = report?.evaluation;
+  const live = report?.research;
+  const score = qual?.buyer_fit_score ?? 0;
 
   return (
-    <div className="space-y-4">
-      <h1 className="text-2xl font-bold text-gray-900">Buyer Research & Qualification</h1>
-      <p className="text-sm text-gray-500">Research a company's website for contacts, qualify buyer fit, and generate outreach drafts.</p>
-
-      <div className="card">
-        <div className="flex gap-2">
-          <input
-            className="input flex-1"
-            placeholder="Company ID (from Companies page)"
-            value={companyId}
-            onChange={(e) => setCompanyId(e.target.value)}
-          />
-          <button onClick={research} disabled={loading} className="btn-primary text-sm">
-            {loading ? 'Researching…' : 'Research'}
-          </button>
-        </div>
-        {msg && <p className="mt-2 text-sm text-gray-700">{msg}</p>}
+    <div className="space-y-4 p-6">
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Buyer Research & Qualification</h1>
+        <p className="text-sm text-gray-500">
+          Durable research reports from real website runs — evidence rows keep
+          the source URL for every contact. Nothing is guessed.
+        </p>
       </div>
 
-      {result && (
+      {msg && <div className="rounded-xl bg-green-50 px-4 py-2 text-sm text-green-700">{msg}</div>}
+      {err && (
+        <div className="flex items-start gap-2 rounded-xl bg-red-50 px-4 py-2 text-sm text-red-700">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /> {err}
+        </div>
+      )}
+
+      {/* company picker */}
+      <div className="card relative">
+        <label className="label">Find a company</label>
+        <div className="relative">
+          <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
+          <input
+            className="input pl-9"
+            placeholder="Type a company name (e.g. Payne, Ambiente exhibitor…)"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
+        {picks.length > 0 && (
+          <div className="mt-2 divide-y divide-gray-50 rounded-xl border border-gray-100">
+            {picks.map((p) => (
+              <button key={p.id}
+                      className="flex w-full items-center justify-between px-3 py-2 text-left hover:bg-gray-50"
+                      onClick={() => { setPicks([]); setQuery(p.name); loadReport(p.id); }}>
+                <span>
+                  <span className="text-sm font-medium text-gray-900">{p.name}</span>
+                  <span className="ml-2 text-xs text-gray-400">
+                    {p.country || '—'} · {p.email_count} email · {p.phone_count} phone
+                  </span>
+                </span>
+                {p.has_research ? (
+                  <span className="badge bg-green-100 text-green-700">
+                    researched · {p.research_score ?? '—'}
+                  </span>
+                ) : (
+                  <span className="badge bg-gray-100 text-gray-500">not researched</span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {report && (
         <>
-          {/* Qualification Score */}
+          {/* profile + score */}
+          <div className="card flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 className="flex items-center gap-2 text-lg font-semibold">
+                <Building2 className="h-5 w-5 text-gray-400" />
+                {report.company.name}
+              </h2>
+              <p className="text-sm text-gray-500">
+                {[report.company.country, report.company.city,
+                  report.company.category].filter(Boolean).join(' · ') || '—'}
+              </p>
+              {report.company.fair && (
+                <p className="text-xs text-gray-400">
+                  {report.company.fair}
+                  {report.company.hall ? ` · ${report.company.hall}` : ''}
+                  {report.company.booth ? ` · booth ${report.company.booth}` : ''}
+                </p>
+              )}
+              <div className="mt-1 flex flex-wrap gap-3 text-xs">
+                {report.company.website && (
+                  <a href={report.company.website} target="_blank" rel="noreferrer"
+                     className="flex items-center gap-1 text-primary-700 hover:underline">
+                    <Globe className="h-3.5 w-3.5" /> {report.company.website}
+                  </a>
+                )}
+                {report.company.profile_url && (
+                  <a href={report.company.profile_url} target="_blank" rel="noreferrer"
+                     className="flex items-center gap-1 text-gray-500 hover:underline">
+                    <Link2 className="h-3.5 w-3.5" /> Fair profile
+                  </a>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className={`flex h-14 w-14 items-center justify-center rounded-full text-xl font-bold text-white
+                ${score >= 70 ? 'bg-green-500' : score >= 40 ? 'bg-yellow-500' : 'bg-gray-400'}`}>
+                {qual ? score : '—'}
+              </div>
+              <div className="text-sm">
+                {qual ? (
+                  <>
+                    <p className="font-semibold">{qual.buyer_type}</p>
+                    <p className="text-xs text-gray-500">{qual.product_fit}</p>
+                    <p className="text-xs text-gray-400">
+                      {qual.evaluated_at
+                        ? `evaluated ${new Date(qual.evaluated_at).toLocaleString()}`
+                        : ''}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-gray-400">No research run yet</p>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button className="btn-primary text-sm" onClick={refresh} disabled={loading}>
+                <RefreshCw className={`mr-1.5 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                {loading ? 'Researching…' : 'Run live research'}
+              </button>
+              <button className="btn-secondary text-sm" onClick={makeDraft} disabled={loading}>
+                <FileText className="mr-1.5 h-4 w-4" /> Draft
+              </button>
+            </div>
+          </div>
+
+          {/* qualification detail */}
           {qual && (
             <div className="card">
-              <div className="flex items-center gap-3">
-                <div className={`flex h-12 w-12 items-center justify-center rounded-full text-lg font-bold text-white ${qual.score >= 70 ? 'bg-green-500' : qual.score >= 40 ? 'bg-yellow-500' : 'bg-gray-400'}`}>
-                  {qual.score}
-                </div>
-                <div>
-                  <h2 className="font-semibold">{result.company_name}</h2>
-                  <p className="text-sm text-gray-500">
-                    {qual.buyer_type} · {qual.product_fit} · {qual.country_fit}
-                  </p>
-                </div>
+              <h3 className="flex items-center gap-2 font-semibold">
+                <Star className="h-4 w-4 text-yellow-500" /> Qualification
+              </h3>
+              <div className="mt-2 grid gap-3 text-sm md:grid-cols-3">
+                <div><span className="text-gray-500">Product fit:</span> {qual.product_fit}</div>
+                <div><span className="text-gray-500">Country fit:</span> {qual.country_fit}</div>
+                <div><span className="text-gray-500">Next action:</span> {qual.recommended_next_action}</div>
               </div>
-              <div className="mt-3">
-                <p className="text-sm font-medium text-gray-700">Recommended: {qual.recommended_next_action}</p>
-                {qual.supporting_snippets?.length > 0 && (
-                  <ul className="mt-2 space-y-1 text-xs text-gray-500">
-                    {qual.supporting_snippets.map((s: string, i: number) => (
-                      <li key={i}>• {s}</li>
-                    ))}
+              {qual.supporting_snippets && qual.supporting_snippets.length > 0 && (
+                <ul className="mt-2 space-y-1 text-xs text-gray-500">
+                  {qual.supporting_snippets.map((s, i) => <li key={i}>• {s}</li>)}
+                </ul>
+              )}
+              {qual.missing_evidence && qual.missing_evidence.length > 0 && (
+                <div className="mt-2">
+                  <p className="text-xs font-medium text-yellow-700">Missing evidence:</p>
+                  <ul className="text-xs text-yellow-600">
+                    {qual.missing_evidence.map((m, i) => <li key={i}>• {m}</li>)}
                   </ul>
-                )}
-                {qual.missing_evidence?.length > 0 && (
-                  <div className="mt-2">
-                    <p className="text-xs font-medium text-yellow-700">Missing evidence:</p>
-                    <ul className="text-xs text-yellow-600">
-                      {qual.missing_evidence.map((m: string, i: number) => (
-                        <li key={i}>• {m}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
+                </div>
+              )}
+              <div className="mt-3 flex gap-4 text-xs text-gray-500">
+                <span>contact completeness: {qual.contact_completeness_score ?? '—'}%</span>
+                <span>evidence quality: {qual.evidence_quality_score ?? '—'}%</span>
+                <span>validation coverage: {qual.validation_coverage ?? '—'}%</span>
               </div>
             </div>
           )}
 
-          {/* Research Results */}
-          {res && (
+          {/* live research output (only after refresh) */}
+          {live && (
             <div className="card">
-              <h3 className="font-semibold">Contact Discovery</h3>
+              <h3 className="font-semibold">Live research result</h3>
               <div className="mt-2 space-y-2">
-                {res.emails?.length > 0 ? (
-                  res.emails.map((e: any, i: number) => (
-                    <div key={i} className="flex items-center gap-2 text-sm">
-                      <Mail className="h-4 w-4 text-gray-400" />
-                      <span>{e.value}</span>
-                      <span className="badge bg-blue-100 text-blue-700 text-xs">{e.extraction_method}</span>
-                      <span className="text-xs text-gray-400">conf: {(e.confidence * 100).toFixed(0)}%</span>
-                    </div>
-                  ))
-                ) : (
-                  <p className="text-sm text-gray-400">No emails found on company website.</p>
-                )}
-                {res.phones?.length > 0 && (
-                  <div className="mt-2">
-                    {res.phones.map((p: any, i: number) => (
-                      <div key={i} className="flex items-center gap-2 text-sm">
-                        <Phone className="h-4 w-4 text-gray-400" />
-                        <span>{p.value}</span>
-                        <span className="badge bg-blue-100 text-blue-700 text-xs">{p.extraction_method}</span>
-                      </div>
-                    ))}
+                {(live.emails || []).map((e: any, i: number) => (
+                  <div key={i} className="flex items-center gap-2 text-sm">
+                    <Mail className="h-4 w-4 text-gray-400" />
+                    <span>{e.value}</span>
+                    <span className="badge bg-blue-100 text-blue-700 text-xs">{e.extraction_method}</span>
+                    <a href={e.source_url} target="_blank" rel="noreferrer"
+                       className="text-xs text-gray-400 hover:underline">
+                      source ({new URL(e.source_url).hostname})
+                    </a>
                   </div>
-                )}
-                {res.whatsapp_links?.length > 0 && (
-                  <div className="mt-2">
-                    {res.whatsapp_links.map((w: any, i: number) => (
-                      <div key={i} className="flex items-center gap-2 text-sm text-green-600">
-                        <CheckCircle className="h-4 w-4" />
-                        <span>WhatsApp: {w.value}</span>
-                      </div>
-                    ))}
+                ))}
+                {(live.phones || []).map((p: any, i: number) => (
+                  <div key={i} className="flex items-center gap-2 text-sm">
+                    <Phone className="h-4 w-4 text-gray-400" />
+                    <span>{p.value}</span>
+                    <span className="badge bg-blue-100 text-blue-700 text-xs">{p.extraction_method}</span>
                   </div>
+                ))}
+                {live.description && <p className="text-xs text-gray-500">{live.description}</p>}
+                {(live.pages_checked || []).length > 0 && (
+                  <p className="text-xs text-gray-400">Checked {live.pages_checked.length} pages</p>
                 )}
-                {res.description && (
-                  <p className="mt-2 text-xs text-gray-500">{res.description}</p>
-                )}
-                {res.pages_checked?.length > 0 && (
-                  <p className="mt-2 text-xs text-gray-400">Checked {res.pages_checked.length} pages</p>
-                )}
-                {res.errors?.length > 0 && (
-                  <div className="mt-2">
-                    {res.errors.map((e: string, i: number) => (
+                {(live.errors || []).length > 0 && (
+                  <div>
+                    {live.errors.map((e: string, i: number) => (
                       <p key={i} className="text-xs text-red-500">{e}</p>
                     ))}
                   </div>
@@ -153,26 +309,98 @@ export default function Research() {
             </div>
           )}
 
-          {/* Outreach Draft */}
+          {/* contacts + evidence (persisted) */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="card">
+              <h3 className="flex items-center gap-2 font-semibold">
+                <CheckCircle className="h-4 w-4 text-green-600" /> Saved contacts
+              </h3>
+              {report.contacts.length === 0 ? (
+                <p className="mt-2 text-sm text-gray-400">No contacts saved yet — run live research.</p>
+              ) : (
+                <ul className="mt-2 space-y-1.5 text-sm">
+                  {report.contacts.map((c) => (
+                    <li key={c.id} className="flex items-center gap-2">
+                      <span className="badge bg-gray-100 text-gray-600">{c.kind}</span>
+                      <span>{c.value}</span>
+                      {c.source_url && (
+                        <a href={c.source_url} target="_blank" rel="noreferrer"
+                           className="text-xs text-gray-400 hover:underline">source</a>
+                      )}
+                      <span className="text-xs text-gray-400">{c.verification}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="card">
+              <h3 className="font-semibold">Research evidence</h3>
+              <p className="text-xs text-gray-400">Every field keeps its source URL + extraction method.</p>
+              {report.evidence.length === 0 ? (
+                <p className="mt-2 text-sm text-gray-400">No evidence rows yet.</p>
+              ) : (
+                <ul className="mt-2 space-y-1.5 text-xs">
+                  {report.evidence.slice(0, 12).map((ev) => (
+                    <li key={ev.id} className="flex items-center gap-2">
+                      <span className="badge bg-gray-100 text-gray-600">{ev.contact_type}</span>
+                      <span className="font-medium">{ev.raw_value}</span>
+                      <span className="text-gray-400">{ev.extraction_method}</span>
+                      <a href={ev.source_url} target="_blank" rel="noreferrer"
+                         className="text-gray-400 hover:underline">
+                        {ev.confidence != null ? `${Math.round(ev.confidence * 100)}%` : 'source'}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+
+          {/* outreach draft */}
           <div className="card">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold">Outreach Draft</h3>
-              {!result.draft && (
-                <button onClick={genDraft} disabled={loading} className="btn-secondary text-sm">
+              {!draft && (
+                <button onClick={makeDraft} disabled={loading} className="btn-secondary text-sm">
                   Generate Draft
                 </button>
               )}
             </div>
-            {result.draft && (
+            {draft && (
               <div className="mt-3 space-y-2">
-                <p className="text-sm font-medium">{result.draft.subject}</p>
-                <pre className="whitespace-pre-wrap rounded bg-gray-50 p-3 text-xs text-gray-700">{result.draft.body}</pre>
+                <p className="text-sm font-medium">{draft.subject}</p>
+                <pre className="whitespace-pre-wrap rounded bg-gray-50 p-3 text-xs text-gray-700">{draft.body}</pre>
                 <p className="text-xs text-yellow-600">⚠️ Requires human approval before sending. Auto-send is disabled.</p>
               </div>
             )}
           </div>
         </>
       )}
+
+      {/* persisted qualified list */}
+      <div className="card">
+        <h3 className="flex items-center gap-2 font-semibold">
+          <Star className="h-4 w-4 text-yellow-500" /> Qualified companies
+          <span className="text-xs font-normal text-gray-400">
+            (persisted scores — no website calls)
+          </span>
+        </h3>
+        {qualified.length === 0 ? (
+          <p className="mt-2 text-sm text-gray-400">
+            No persisted evaluations yet — run live research on a company above.
+          </p>
+        ) : (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {qualified.slice(0, 20).map((q) => (
+              <button key={q.company_id}
+                      className="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs hover:bg-gray-100"
+                      onClick={() => loadReport(q.company_id)}>
+                <b>{q.score}</b> · {q.name} · {q.buyer_type}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

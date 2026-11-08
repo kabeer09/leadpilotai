@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings, startup_warnings
-from app import api_auth, api_health, api_crawls, api_crm, api_email, api_analytics, api_admin, api_google, api_whatsapp, api_import, api_research, api_enrich, api_verify, api_gbleads, api_trade
+from app import api_auth, api_health, api_crawls, api_crm, api_email, api_analytics, api_admin, api_google, api_whatsapp, api_import, api_research, api_enrich, api_verify, api_gbleads, api_trade, api_discovery, api_exhibitors
 # Import research models so tables are created
 from app import models_research  # noqa: F401
 from app import models_gbleads  # noqa: F401
@@ -37,6 +37,8 @@ app.include_router(api_enrich.router)
 app.include_router(api_verify.router)
 app.include_router(api_gbleads.router)
 app.include_router(api_trade.router)
+app.include_router(api_discovery.router)
+app.include_router(api_exhibitors.router)
 
 # Serve frontend static files if available (for combined deployment)
 import os as _os
@@ -75,6 +77,12 @@ def _startup():
                 conn.execute(_t("ALTER TABLE users ADD COLUMN whatsapp_number VARCHAR(20)"))
             if "whatsapp_verified" not in cols:
                 conn.execute(_t("ALTER TABLE users ADD COLUMN whatsapp_verified BOOLEAN DEFAULT FALSE"))
+            conn.commit()
+        # Phase 3: durable research payload on evaluations
+        if "evaluation_results" in inspector.get_table_names():
+            cols = [c["name"] for c in inspector.get_columns("evaluation_results")]
+            if "result_json" not in cols:
+                conn.execute(_t("ALTER TABLE evaluation_results ADD COLUMN result_json TEXT"))
             conn.commit()
     except Exception as e:
         import logging
