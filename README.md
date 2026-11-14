@@ -1,9 +1,13 @@
 # LeadPilot Public Trial
 
-SaaS-style B2B lead research + email automation. Anyone can sign up, crawl
-public company websites, build lead lists, preview campaigns and send
-authorized test emails. Dry-run by default — nothing leaves the server until
-a provider is configured **and** the owner confirms twice.
+SaaS-style B2B lead research + email automation extended into an
+AI-powered global trade intelligence platform: UN Comtrade search,
+competitor/HS/country analysis, buyer discovery, exhibitor extraction,
+company research and an AI analyst — every figure source-attributed and
+tenant-scoped. Anyone can sign up, crawl public company websites, build
+lead lists, preview campaigns and send authorized test emails. Dry-run by
+default — nothing leaves the server until a provider is configured
+**and** the owner confirms twice.
 
 ## Run locally
 
@@ -30,9 +34,16 @@ cd backend
 python -m pytest tests/ -q -p no:cacheprovider -W ignore
 ```
 
+303 tests: auth/isolation, crawler/SSRF, CRM, email, trade-data and AI
+honesty contracts, funnel math, plus a Phase 7 security sweep — every
+non-public route must answer 401, the public allowlist is frozen at 17
+routes, config endpoints never echo secret values, outbound trade calls
+are rate limited, and the heavy list pages are guarded against N+1
+queries.
+
 Provider calls are mocked — tests never send real emails, never hit the
-Google Places API, Overpass or Nominatim, and never touch the dev
-database (isolated `test_trial.db`).
+Google Places API, Overpass, Nominatim or UN Comtrade, and never touch
+the dev database (isolated `test_trial.db`).
 
 ## Business Lead Finder
 
@@ -121,19 +132,23 @@ See [`docs/deployment.md`](docs/deployment.md) (Render + Supabase),
 
 - `backend/app/` — FastAPI: auth, crawls, CRM, campaigns, analytics, admin,
   Business Lead Finder (Google Places + free OpenStreetMap providers,
-  enrichment, scoring)
+  enrichment, scoring), global trade intelligence (UN Comtrade adapters,
+  competitor/HS/country intel, buyer discovery, exhibitor extraction,
+  company research), AI analyst + lead scoring
 - `backend/alembic/` — migrations (never destructive; no `create_all` on boot)
 - `backend/tests/` — pytest suite (auth, crawler/SSRF, CRM, email, isolation,
-  business leads)
+  business leads, trade/AI honesty, security + performance sweep)
 - `frontend/src/` — React+TS+Vite+Tailwind pages (see Navigation below)
 - `render.yaml` — Render blueprint (Supabase Postgres + web + static)
 
 ## Navigation
 
-Overview, Companies, Leads, Business Leads, 
-Website Crawling, Email Campaigns, Email Activity, Follow-ups, Analytics,
-Settings (+ public Landing/Login/Signup, password reset, one-click
-Unsubscribe).
+Overview, Companies, Leads, Business Leads, Global Trade Data (tabs:
+Search, Competitor analysis, HS intelligence, Country compare, AI
+analyst), Buyer Discovery, Exhibitor Dashboard, Website Crawling, Email
+Campaigns, Trade Fair Sources, Buyer Research, WhatsApp, Email Activity,
+Follow-ups, Analytics, Settings (+ public Landing/Login/Signup, password
+reset, one-click Unsubscribe).
 
 ## Safety model (short version)
 

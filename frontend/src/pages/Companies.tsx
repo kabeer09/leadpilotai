@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Search, Download } from 'lucide-react';
-import { listCompanies } from '../lib/api';
+import { listCompanies, companiesExport } from '../lib/api';
 
 const BAND_BADGE: Record<string, string> = {
   Hot: 'bg-rose-100 text-rose-700',
@@ -23,6 +23,29 @@ export default function Companies() {
   const [band, setBand] = useState('');
   const [filterError, setFilterError] = useState('');
   const [loading, setLoading] = useState(true);
+
+  // Auth-protected endpoint — a raw <a href> can't carry the Authorization
+  // header (it would 401), so fetch as blob and save client-side.
+  const downloadCsv = async () => {
+    setFilterError('');
+    try {
+      const p: Record<string, string | number> = { lifecycle };
+      if (search) p.search = search;
+      if (country) p.country = country;
+      if (hasEmail) p.has_email = hasEmail === 'yes' ? 'true' : 'false';
+      if (hasResearch) p.has_research = hasResearch === 'yes' ? 'true' : 'false';
+      if (band) p.band = band;
+      const blob = await companiesExport(p);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `companies-${Date.now()}.csv`;
+      a.click(); URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } };
+      setFilterError(err.response?.data?.detail || 'Export failed.');
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -58,7 +81,7 @@ export default function Companies() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-2xl font-bold text-gray-900">Companies ({total.toLocaleString()})</h1>
-        <a href="/api/companies/export" className="btn-secondary text-sm"><Download className="mr-1 h-4 w-4" /> CSV</a>
+        <button onClick={downloadCsv} className="btn-secondary text-sm"><Download className="mr-1 h-4 w-4" /> CSV</button>
       </div>
       <div className="flex flex-col gap-2 sm:flex-row">
         <div className="relative flex-1">

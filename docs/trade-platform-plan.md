@@ -117,7 +117,7 @@ All endpoints: JWT auth, rate limits, Pydantic/Query validation, audit on writes
 | 4 | Competitor analysis, HS intelligence, country comparison | ✅ this round — 243/243 tests green, build clean, 3 new endpoints + 4-tab UI DOM-verified |
 | 5 | AI Trade Analyst, lead scoring, AI research reports | ✅ this round — 274/274 tests green, build clean, 3 AI endpoints + 5-tab UI + Research AI cards |
 | 6 | CRM improvements, email automation, dashboard analytics | ✅ this round — 296/296 tests green, build clean, funnel/pipeline endpoints + send-time re-mail guards + audience filters DOM-verified |
-| 7 | Testing, security review, performance, docs, deployment prep | pending |
+| 7 | Testing, security review, performance, docs, deployment prep | ✅ this round — 303/303 tests green, build clean: 7 new security/perf tests (route sweep 95/95 → 401, frozen 17-route public allowlist, admin RBAC, secret-leak sentinels, trade 429, N+1 guards, `.env.example` parity) + outbound trade rate limits + docs updated |
 
 Each phase ends with: migrations run, backend tests green (existing 154 must stay
 green), frontend `npm run build` clean, modified-file report, completed/pending list.

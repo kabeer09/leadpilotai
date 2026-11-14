@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     RATE_LOGIN_PER_MIN: int = 10
     RATE_SIGNUP_PER_MIN: int = 5
     RATE_SENSITIVE_PER_MIN: int = 20
+    # Inbound cap for endpoints that trigger OUTBOUND UN Comtrade calls
+    # (the provider also self-throttles via TRADE_MIN_INTERVAL + backoff;
+    # this stops one client from burning the shared egress budget).
+    RATE_TRADE_PER_MIN: int = 30
 
     class Config:
         env_file = ".env"

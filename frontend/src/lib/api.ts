@@ -76,6 +76,11 @@ export const mergeApply = (a: number, b: number) =>
   api.post('/companies/merge', { keep_id: a, duplicate_id: b }).then((r) => r.data);
 // Phase 6: CRM pipeline (status/lifecycle/coverage + lead-score bands)
 export const crmPipeline = () => api.get('/crm/pipeline').then((r) => r.data);
+// Authenticated download: fetch as blob (a plain <a> link can't carry the
+// Authorization header), then save client-side.
+export const companiesExport = (p: Record<string, string | number>) =>
+  api.get('/companies/export', { params: p, responseType: 'blob' })
+    .then((r) => r.data as Blob);
 
 // Campaigns + email
 export const listCampaigns = () => api.get('/campaigns').then((r) => r.data);

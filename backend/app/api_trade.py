@@ -197,7 +197,9 @@ def _build_params(reporter_code: int, period_from: str, period_to: str,
 # search / statistics
 # ---------------------------------------------------------------------------
 
-@router.get("/trade/search")
+@router.get("/trade/search",
+            dependencies=[Depends(rate_limit(
+                "trade", settings.RATE_TRADE_PER_MIN))])
 def trade_search(
         reporter_code: int = Query(..., gt=0,
                                    description="UN Comtrade reporter code"),
@@ -264,7 +266,9 @@ def _run_statistics(db: Session, params: dict) -> dict:
     return payload
 
 
-@router.get("/trade/statistics")
+@router.get("/trade/statistics",
+            dependencies=[Depends(rate_limit(
+                "trade", settings.RATE_TRADE_PER_MIN))])
 def trade_statistics(
         reporter_code: int = Query(..., gt=0),
         period_from: str = Query("2019"),
@@ -365,7 +369,9 @@ def _parse_reporter_codes(raw: str) -> list[int]:
     return codes
 
 
-@router.get("/trade/competitors")
+@router.get("/trade/competitors",
+            dependencies=[Depends(rate_limit(
+                "trade", settings.RATE_TRADE_PER_MIN))])
 def trade_competitors(
         destination_code: int = Query(
             ..., gt=0,
@@ -410,7 +416,9 @@ def trade_competitors(
     }
 
 
-@router.get("/trade/hs-intel")
+@router.get("/trade/hs-intel",
+            dependencies=[Depends(rate_limit(
+                "trade", settings.RATE_TRADE_PER_MIN))])
 def trade_hs_intel(
         cmd_code: str = Query(..., description="HS code, e.g. 7113"),
         reporter_code: int | None = Query(
@@ -483,7 +491,9 @@ def trade_hs_intel(
     }
 
 
-@router.get("/trade/compare")
+@router.get("/trade/compare",
+            dependencies=[Depends(rate_limit(
+                "trade", settings.RATE_TRADE_PER_MIN))])
 def trade_compare(
         reporter_codes: str = Query(
             ..., description="2-4 comma-separated UN reporter codes"),
