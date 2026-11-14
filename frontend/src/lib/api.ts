@@ -196,6 +196,16 @@ export const tradeHsIntel = (p: Record<string, string | number>) =>
 export const tradeCompare = (p: Record<string, string | number>) =>
   api.get('/trade/compare', { params: p }).then((r) => r.data);
 
+// Phase 5: AI Trade Analyst, lead scoring, AI research summaries.
+// Narratives are assembled server-side from computed facts and always
+// carry engine + ai_generated labels (deterministic_template when no AI).
+export const aiTradeAnalyst = (d: { kind: string; params: Record<string, unknown> }) =>
+  api.post('/ai/trade-analyst', d).then((r) => r.data);
+export const aiLeadScore = (companyId: number) =>
+  api.post('/ai/lead-score', { company_id: companyId }).then((r) => r.data);
+export const aiResearchSummary = (companyId: number) =>
+  api.post(`/ai/research-summary/${companyId}`).then((r) => r.data);
+
 // Analytics + health
 export const overview = (days = 30) => api.get('/analytics/overview', { params: { days } }).then((r) => r.data);
 export const trends = (days = 30) => api.get('/analytics/trends', { params: { days } }).then((r) => r.data);

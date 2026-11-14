@@ -6,7 +6,7 @@ import {
 } from 'recharts';
 import {
   Search, Save, Trash2, Download, RefreshCw, Database,
-  AlertTriangle, Building2, Info, Scale, Package, Globe,
+  AlertTriangle, Building2, Info, Scale, Package, Globe, Sparkles,
 } from 'lucide-react';
 import {
   tradeSearch, tradeStatistics, tradeHsCodes, tradeCountries,
@@ -16,6 +16,7 @@ import {
 import CompetitorsTab from './trade/CompetitorsTab';
 import HsIntelTab from './trade/HsIntelTab';
 import CompareTab from './trade/CompareTab';
+import AnalystTab from './trade/AnalystTab';
 
 const errText = (e: unknown) =>
   (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
@@ -90,7 +91,7 @@ export default function GlobalTrade() {
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<'search' | 'competitors' | 'hs' | 'compare'>('search');
+  const [tab, setTab] = useState<'search' | 'competitors' | 'hs' | 'compare' | 'analyst'>('search');
 
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(''), 4000); };
 
@@ -233,6 +234,7 @@ export default function GlobalTrade() {
           ['competitors', 'Competitor analysis', Globe],
           ['hs', 'HS intelligence', Package],
           ['compare', 'Country compare', Scale],
+          ['analyst', 'AI analyst', Sparkles],
         ] as const).map(([key, label, Icon]) => (
           <button key={key}
                   onClick={() => setTab(key)}
@@ -490,6 +492,7 @@ export default function GlobalTrade() {
       {tab === 'competitors' && <CompetitorsTab />}
       {tab === 'hs' && <HsIntelTab />}
       {tab === 'compare' && <CompareTab />}
+      {tab === 'analyst' && <AnalystTab />}
 
       {/* ---- data sources ---- */}
       <div className="card">

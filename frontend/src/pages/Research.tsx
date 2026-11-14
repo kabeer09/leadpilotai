@@ -2,11 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Search, RefreshCw, Mail, Globe, Phone, AlertTriangle, CheckCircle,
-  FileText, Star, Building2, Link2,
+  FileText, Star, Building2, Link2, Sparkles, Gauge,
 } from 'lucide-react';
 import {
   researchPickCompanies, researchReport, researchReportRefresh,
-  generateDraft, listQualified,
+  generateDraft, listQualified, aiResearchSummary, aiLeadScore,
 } from '../lib/api';
 
 const errText = (e: unknown) =>
@@ -44,6 +44,19 @@ interface Report {
 }
 interface QualRow { company_id: number; name: string; score: number;
   buyer_type: string; evaluated_at?: string; }
+interface AiSummary {
+  record_type: string; kind: string; engine: string; ai_generated: boolean;
+  fallback_reason?: string | null; facts: string[]; narrative: string;
+  note?: string;
+}
+interface LeadScore {
+  record_type: string; company: { id: number; name: string };
+  score: number; max: number; band: string;
+  factors: { key: string; label: string; points: number; max: number;
+             reason: string }[];
+  engine: string; ai_generated: boolean; note?: string;
+  inputs: Record<string, unknown>;
+}
 
 export default function Research() {
   const [params, setParams] = useSearchParams();
@@ -51,6 +64,8 @@ export default function Research() {
   const [picks, setPicks] = useState<Pick[]>([]);
   const [report, setReport] = useState<Report | null>(null);
   const [draft, setDraft] = useState<{ subject: string; body: string } | null>(null);
+  const [ai, setAi] = useState<AiSummary | null>(null);
+  const [leadScore, setLeadScore] = useState<LeadScore | null>(null);
   const [qualified, setQualified] = useState<QualRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState('');
@@ -63,7 +78,7 @@ export default function Research() {
     setErr('');
     try {
       const r: Report = await researchReport(id);
-      setReport(r); setDraft(null);
+      setReport(r); setDraft(null); setAi(null); setLeadScore(null);
     } catch (e) { setErr(errText(e)); }
   }, []);
 
@@ -110,6 +125,28 @@ export default function Research() {
     try {
       const r = await generateDraft(report.company.id);
       setDraft(r.draft);
+    } catch (e) { setErr(errText(e)); }
+    finally { setLoading(false); }
+  };
+
+  // AI summary: narrative assembled server-side from this report's
+  // persisted rows only (zero network) — engine label travels with it.
+  const runAiSummary = async () => {
+    if (!report) return;
+    setLoading(true); setErr('');
+    try {
+      setAi(await aiResearchSummary(report.company.id));
+    } catch (e) { setErr(errText(e)); }
+    finally { setLoading(false); }
+  };
+
+  // Explainable lead score: factors carry points/max/reason and sum
+  // exactly to the score (deterministic — no LLM in the scoring path).
+  const runLeadScore = async () => {
+    if (!report) return;
+    setLoading(true); setErr('');
+    try {
+      setLeadScore(await aiLeadScore(report.company.id));
     } catch (e) { setErr(errText(e)); }
     finally { setLoading(false); }
   };
@@ -236,8 +273,102 @@ export default function Research() {
               <button className="btn-secondary text-sm" onClick={makeDraft} disabled={loading}>
                 <FileText className="mr-1.5 h-4 w-4" /> Draft
               </button>
+              <button className="btn-secondary text-sm" onClick={runAiSummary} disabled={loading}>
+                <Sparkles className="mr-1.5 h-4 w-4" /> AI summary
+              </button>
+              <button className="btn-secondary text-sm" onClick={runLeadScore} disabled={loading}>
+                <Gauge className="mr-1.5 h-4 w-4" /> Lead score
+              </button>
             </div>
           </div>
+
+          {/* AI summary: labelled narrative over persisted rows only */}
+          {ai && (
+            <div className="card">
+              <h3 className="flex flex-wrap items-center gap-2 font-semibold">
+                <Sparkles className="h-4 w-4 text-purple-500" /> AI summary
+                <span className={`badge ${ai.engine === 'gemini'
+                  ? 'bg-purple-100 text-purple-700'
+                  : 'bg-gray-100 text-gray-600'}`}>
+                  {ai.engine === 'gemini' ? 'AI narrative · Gemini'
+                    : 'Deterministic template'}
+                </span>
+                {ai.fallback_reason && (
+                  <span className="badge bg-amber-100 text-amber-700">
+                    fallback: {ai.fallback_reason}
+                  </span>
+                )}
+              </h3>
+              <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-gray-700">
+                {ai.narrative}
+              </p>
+              <details className="mt-3">
+                <summary className="cursor-pointer text-xs text-gray-400">
+                  Show the {ai.facts.length} facts this was built from
+                </summary>
+                <ul className="mt-2 space-y-1">
+                  {ai.facts.map((f, i) => (
+                    <li key={i}
+                        className="rounded-lg bg-gray-50 px-3 py-1.5 font-mono text-xs text-gray-700">
+                      {f}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+              <p className="mt-2 text-xs text-gray-400">{ai.note}</p>
+            </div>
+          )}
+
+          {/* Lead score: explainable, factors sum exactly to the score */}
+          {leadScore && (
+            <div className="card">
+              <h3 className="flex flex-wrap items-center gap-2 font-semibold">
+                <Gauge className="h-4 w-4 text-indigo-500" /> Lead score
+                <span className="badge bg-indigo-100 text-indigo-700">
+                  {leadScore.engine}
+                </span>
+                <span className="text-xs font-normal text-gray-400">
+                  {leadScore.ai_generated ? 'AI-generated' : 'deterministic — not AI'}
+                </span>
+              </h3>
+              <div className="mt-3 flex items-center gap-4">
+                <div className={`flex h-16 w-16 items-center justify-center rounded-full text-xl font-bold text-white
+                  ${leadScore.band === 'Hot' ? 'bg-green-500'
+                    : leadScore.band === 'Warm' ? 'bg-yellow-500'
+                    : leadScore.band === 'Nurture' ? 'bg-blue-500' : 'bg-gray-400'}`}>
+                  {leadScore.score}
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-gray-800">
+                    {leadScore.band} · {leadScore.score}/{leadScore.max}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Every factor below carries its points, maximum and reason —
+                    they add up to exactly {leadScore.score}.
+                  </p>
+                </div>
+              </div>
+              <div className="mt-3 space-y-2">
+                {leadScore.factors.map((f) => (
+                  <div key={f.key}
+                       className="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="font-medium text-gray-800">{f.label}</span>
+                      <span className="font-mono text-xs text-gray-600">
+                        {f.points} / {f.max}
+                      </span>
+                    </div>
+                    <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-gray-200">
+                      <div className="h-full rounded-full bg-indigo-500"
+                           style={{ width: `${Math.round((f.points / f.max) * 100)}%` }} />
+                    </div>
+                    <p className="mt-1 text-xs text-gray-500">{f.reason}</p>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-3 text-xs text-gray-400">{leadScore.note}</p>
+            </div>
+          )}
 
           {/* qualification detail */}
           {qual && (
