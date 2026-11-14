@@ -311,6 +311,13 @@ def narrative_for(kind: str, facts: list[str]
 # lead scoring — deterministic, explainable, factors sum to the score
 # ---------------------------------------------------------------------------
 
+def score_band(total: float) -> str:
+    """Canonical Hot/Warm/Nurture/Low thresholds — shared by the lead-score
+    endpoint, the CRM pipeline and the dashboard so every surface agrees."""
+    return ("Hot" if total >= 70 else "Warm" if total >= 45
+            else "Nurture" if total >= 25 else "Low")
+
+
 def lead_score(evaluation: dict | None, email_count: int,
                phone_count: int, evidence_count: int,
                company: dict) -> dict:
@@ -373,8 +380,7 @@ def lead_score(evaluation: dict | None, email_count: int,
                    f"{'present' if has_cat else 'missing'} +5/5")})
 
     total = round(sum(f["points"] for f in factors), 1)
-    band = ("Hot" if total >= 70 else "Warm" if total >= 45
-            else "Nurture" if total >= 25 else "Low")
+    band = score_band(total)
     return {
         "score": total,
         "max": 100,

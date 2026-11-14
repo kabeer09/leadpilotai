@@ -116,7 +116,7 @@ All endpoints: JWT auth, rate limits, Pydantic/Query validation, audit on writes
 | 3 | Buyer/supplier discovery, exhibitor extraction improvements, company research | ✅ this round — 216/216 tests green, build clean, pages DOM-verified |
 | 4 | Competitor analysis, HS intelligence, country comparison | ✅ this round — 243/243 tests green, build clean, 3 new endpoints + 4-tab UI DOM-verified |
 | 5 | AI Trade Analyst, lead scoring, AI research reports | ✅ this round — 274/274 tests green, build clean, 3 AI endpoints + 5-tab UI + Research AI cards |
-| 6 | CRM improvements, email automation, dashboard analytics | pending |
+| 6 | CRM improvements, email automation, dashboard analytics | ✅ this round — 296/296 tests green, build clean, funnel/pipeline endpoints + send-time re-mail guards + audience filters DOM-verified |
 | 7 | Testing, security review, performance, docs, deployment prep | pending |
 
 Each phase ends with: migrations run, backend tests green (existing 154 must stay

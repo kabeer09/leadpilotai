@@ -74,6 +74,8 @@ export const mergePreview = (a: number, b: number) =>
   api.post('/companies/merge-preview', { keep_id: a, duplicate_id: b }).then((r) => r.data);
 export const mergeApply = (a: number, b: number) =>
   api.post('/companies/merge', { keep_id: a, duplicate_id: b }).then((r) => r.data);
+// Phase 6: CRM pipeline (status/lifecycle/coverage + lead-score bands)
+export const crmPipeline = () => api.get('/crm/pipeline').then((r) => r.data);
 
 // Campaigns + email
 export const listCampaigns = () => api.get('/campaigns').then((r) => r.data);
@@ -209,4 +211,7 @@ export const aiResearchSummary = (companyId: number) =>
 // Analytics + health
 export const overview = (days = 30) => api.get('/analytics/overview', { params: { days } }).then((r) => r.data);
 export const trends = (days = 30) => api.get('/analytics/trends', { params: { days } }).then((r) => r.data);
+// Phase 6: strictly nested conversion funnel; rates are null (not 0) when
+// their denominator is zero — the UI must render null as "—", never "0%".
+export const analyticsFunnel = () => api.get('/analytics/funnel').then((r) => r.data);
 export const health = () => api.get('/health').then((r) => r.data);

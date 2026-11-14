@@ -194,20 +194,47 @@ def emails_sent_today(db, user_id: int) -> int:
 
 # ---------- campaign send (idempotent, quota-guarded) ----------
 def send_campaign(db, user, campaign: Campaign, allow_resend: bool = False) -> dict:
+    """Send all PENDING recipients of a campaign.
+
+    Send-time guard (never re-mail): suppression and prior contact are
+    re-checked HERE, not only when recipients were built — an unsubscribe or
+    another campaign's send between build and send must still stop the mail.
+    Skipped recipients are marked SUPPRESSED with an honest reason; no
+    EmailMessage row is created for them.
+    """
     provider = get_provider_for_user(user)
     if settings.EMAIL_PROVIDER != "dryrun" and not user.email_verified:
-        return {"sent": 0, "failed": 0, "skipped": 0,
+        return {"sent": 0, "failed": 0, "skipped": 0, "skip_reasons": {},
                 "errors": ["Verify your email address before live sending"]}
     recipients = db.query(CampaignRecipient).filter(
         CampaignRecipient.campaign_id == campaign.id,
         CampaignRecipient.status == "PENDING").all()
     sent = failed = skipped = 0
+    skip_reasons: dict[str, int] = {}
     errors: list[str] = []
+    quota_hit = False
     for r in recipients:
         if emails_sent_today(db, user.id) >= settings.DAILY_EMAIL_LIMIT:
             r.status = "PENDING"
+            quota_hit = True
             errors.append("daily email quota reached — remaining recipients kept queued")
             break
+        # --- send-time guard: never mail the suppressed / already-mailed ---
+        if is_suppressed(db, user.id, r.email):
+            r.status = "SUPPRESSED"
+            r.error = "suppressed at send time — not mailed"
+            skip_reasons["suppressed"] = skip_reasons.get("suppressed", 0) + 1
+            skipped += 1
+            db.commit()
+            continue
+        if not allow_resend and previously_contacted(db, user.id, r.email):
+            r.status = "SUPPRESSED"
+            r.error = "already contacted previously — never re-mail"
+            skip_reasons["already_contacted"] = (
+                skip_reasons.get("already_contacted", 0) + 1)
+            skipped += 1
+            db.commit()
+            continue
         lead = db.query(Lead).filter(
             Lead.id == r.lead_id, Lead.user_id == user.id).first()
         if not lead:
@@ -258,9 +285,18 @@ def send_campaign(db, user, campaign: Campaign, allow_resend: bool = False) -> d
             failed += 1
             errors.append(f"{r.email}: {r.error}"[:200])
         db.commit()
-    campaign.status = "SENT" if failed == 0 else ("SENT" if sent else "DRAFT")
+    # Honest terminal state. Quota-interrupted campaigns stay resumable
+    # (SENDING, remaining recipients still PENDING); campaigns where nothing
+    # went out never claim "SENT".
+    if quota_hit:
+        campaign.status = "SENDING"
+    elif sent:
+        campaign.status = "SENT"
+    else:
+        campaign.status = "DRAFT"
     db.commit()
-    return {"sent": sent, "failed": failed, "skipped": skipped, "errors": errors[:10]}
+    return {"sent": sent, "failed": failed, "skipped": skipped,
+            "skip_reasons": skip_reasons, "errors": errors[:10]}
 
 
 def process_due_followups(db, user_id: int, limit: int = 20) -> dict:

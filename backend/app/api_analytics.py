@@ -94,3 +94,16 @@ def trends(days: int = 30, db: Session = Depends(get_db),
             "by_country": [{"country": k or "Unknown", "leads": v}
                            for k, v in sorted(by_country.items(),
                                               key=lambda x: -x[1])[:15]]}
+
+
+@router.get("/funnel")
+def funnel(db: Session = Depends(get_db),
+           user: User = Depends(get_current_user)):
+    """Strictly nested conversion funnel + honest delivery/reply rates.
+
+    Delegates to `crm_insights.funnel_summary` so the dashboard, CRM and
+    tests all read the same tenant-scoped persisted rows. Rates are null
+    when their denominator is zero — never a fabricated 0%.
+    """
+    from app import crm_insights
+    return crm_insights.funnel_summary(db, user.id)

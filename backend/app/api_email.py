@@ -8,8 +8,8 @@ from app.models import (User, Lead, Contact, Company, Campaign, CampaignRecipien
 from app.schemas import CampaignCreate, CampaignSend, TestSend
 from app.deps import get_current_user, rate_limit, audit
 from app.config import settings
-from app.emailing import (get_provider, normalize_email, is_suppressed,
-                          previously_contacted, personalize, send_campaign,
+from app.emailing import (get_provider, normalize_email,
+                          personalize, send_campaign,
                           process_due_followups, emails_sent_today)
 
 router = APIRouter(prefix="/api", tags=["email"])
@@ -17,49 +17,115 @@ router = APIRouter(prefix="/api", tags=["email"])
 
 def _build_recipients(db: Session, user: User, campaign: Campaign,
                       lead_ids: list[int], allow_resend: bool = False,
-                      batch_limit: int | None = None) -> dict:
+                      batch_limit: int | None = None,
+                      require_research: bool = False,
+                      min_buyer_fit: int | None = None) -> dict:
+    """Build the recipient list for a campaign.
+
+    Audience contract (honest data):
+    - `require_research` keeps only companies with PERSISTED research rows —
+      directory presence alone never proves a buyer.
+    - `min_buyer_fit` keeps only companies whose latest persisted evaluation
+      is at/above the threshold; no evaluation = cannot prove fit = skipped.
+    - Suppression and prior contact are always enforced (bulk lookups, no
+      per-lead queries).
+    """
+    from app import crm_insights
+
     added = skipped_suppressed = skipped_contacted = skipped_noemail = 0
+    skipped_unresearched = skipped_low_fit = 0
     if not lead_ids:
         # No IDs listed = ALL leads with email (batch limit applied after)
         lead_ids = [l.id for l in db.query(Lead.id).filter(
             Lead.user_id == user.id).order_by(Lead.id).all()]
         if batch_limit:
             lead_ids = lead_ids[:batch_limit]
-    for lid in dict.fromkeys(lead_ids):
-        lead = db.query(Lead).filter(
-            Lead.id == lid, Lead.user_id == user.id).first()
-        if not lead:
-            continue
-        contact = None
-        if lead.contact_id:
-            contact = db.query(Contact).filter(Contact.id == lead.contact_id).first()
-        if not contact or contact.kind != "EMAIL":
-            contact = db.query(Contact).filter(
-                Contact.company_id == lead.company_id,
+    lead_ids = list(dict.fromkeys(lead_ids))
+    if not lead_ids:
+        return {"added": 0, "skipped_suppressed": 0, "skipped_contacted": 0,
+                "skipped_noemail": 0, "skipped_unresearched": 0,
+                "skipped_low_fit": 0}
+
+    # ---- bulk hydration (one query per table, tenant-scoped) ----
+    leads = db.query(Lead).filter(
+        Lead.user_id == user.id, Lead.id.in_(lead_ids)).all()
+    order = {lid: i for i, lid in enumerate(lead_ids)}
+    leads.sort(key=lambda l: order.get(l.id, 0))
+    company_ids = list({l.company_id for l in leads})
+
+    researched = crm_insights.research_flags_for(db, user.id, company_ids)
+    evals: dict = {}
+    if min_buyer_fit is not None:
+        from app import api_research  # local import: avoids a cycle
+        evals = api_research._latest_evaluations(db, user.id, company_ids)
+
+    contact_ids = {l.contact_id for l in leads if l.contact_id}
+    by_id = ({c.id: c for c in db.query(Contact).filter(
+        Contact.id.in_(list(contact_ids)))} if contact_ids else {})
+    company_email: dict[int, Contact] = {}
+    if company_ids:
+        for c in db.query(Contact).filter(
+                Contact.company_id.in_(company_ids),
                 Contact.kind == "EMAIL").order_by(
-                Contact.is_primary.desc()).first()
+                Contact.is_primary.desc(), Contact.id.asc()):
+            company_email.setdefault(c.company_id, c)
+
+    sup_values = {v for (v,) in db.query(Suppression.value).filter(
+        Suppression.user_id == user.id).all()}
+    emailed = {e for (e,) in db.query(EmailMessage.to_email).filter(
+        EmailMessage.user_id == user.id,
+        EmailMessage.status.in_(["accepted", "delivered", "replied"]),
+        EmailMessage.is_test.is_(False)).distinct().all()}
+    # Idempotency: recipients already built for THIS campaign (bulk).
+    existing_keys = {k for (k,) in db.query(
+        CampaignRecipient.idempotency_key).filter(
+        CampaignRecipient.campaign_id == campaign.id).all()}
+
+    def pick_email(lead: Lead) -> Contact | None:
+        c = by_id.get(lead.contact_id) if lead.contact_id else None
+        if c and c.kind == "EMAIL":
+            return c
+        return company_email.get(lead.company_id)
+
+    for lead in leads:
+        # ---- audience filters: persisted research only ----
+        if require_research and not researched.get(lead.company_id, False):
+            skipped_unresearched += 1
+            continue
+        if min_buyer_fit is not None:
+            ev = evals.get(lead.company_id)
+            fit = getattr(ev, "buyer_fit_score", None) if ev else None
+            if fit is None:
+                skipped_unresearched += 1  # no evaluation -> cannot prove fit
+                continue
+            if fit < min_buyer_fit:
+                skipped_low_fit += 1
+                continue
+        contact = pick_email(lead)
         if not contact:
             skipped_noemail += 1
             continue
         email = normalize_email(contact.value)
-        if is_suppressed(db, user.id, email):
+        if email in sup_values:
             skipped_suppressed += 1
             continue
-        if not allow_resend and previously_contacted(db, user.id, email):
+        if not allow_resend and email in emailed:
             skipped_contacted += 1
             continue
         key = f"{campaign.id}:{lead.id}:{email}"
-        exists = db.query(CampaignRecipient).filter(
-            CampaignRecipient.idempotency_key == key).first()
-        if exists:
+        if key in existing_keys:
             continue
+        existing_keys.add(key)
         db.add(CampaignRecipient(user_id=user.id, campaign_id=campaign.id,
                                  lead_id=lead.id, email=email,
                                  idempotency_key=key))
         added += 1
     db.commit()
     return {"added": added, "skipped_suppressed": skipped_suppressed,
-            "skipped_contacted": skipped_contacted, "skipped_noemail": skipped_noemail}
+            "skipped_contacted": skipped_contacted,
+            "skipped_noemail": skipped_noemail,
+            "skipped_unresearched": skipped_unresearched,
+            "skipped_low_fit": skipped_low_fit}
 
 
 @router.get("/campaigns")
@@ -82,7 +148,9 @@ def create_campaign(payload: CampaignCreate, db: Session = Depends(get_db),
     db.refresh(c)
     info = _build_recipients(db, user, c, payload.lead_ids,
                              allow_resend=payload.allow_resend,
-                             batch_limit=payload.batch_limit)
+                             batch_limit=payload.batch_limit,
+                             require_research=payload.require_research,
+                             min_buyer_fit=payload.min_buyer_fit)
     audit(db, user.id, "campaign_create", "campaign", c.id, payload.name[:200])
     db.commit()
     return {"id": c.id, "status": c.status, **info}
@@ -91,28 +159,64 @@ def create_campaign(payload: CampaignCreate, db: Session = Depends(get_db),
 @router.get("/campaigns/{campaign_id}/preview")
 def campaign_preview(campaign_id: int, db: Session = Depends(get_db),
                      user: User = Depends(get_current_user)):
+    """What will actually be mailed, plus why a recipient is risky.
+
+    Per-recipient rows carry the persisted lead score/band, whether the
+    address was already contacted, and whether it is suppressed — so the
+    confirmation dialog shows the real picture before anything irreversible
+    happens. No network calls; everything is read from stored rows.
+    """
     c = db.query(Campaign).filter(
         Campaign.id == campaign_id, Campaign.user_id == user.id).first()
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
     recs = db.query(CampaignRecipient).filter(
         CampaignRecipient.campaign_id == c.id).all()
+
+    from app import crm_insights
+    lead_ids = {r.lead_id for r in recs}
+    leads = {l.id: l for l in db.query(Lead).filter(
+        Lead.id.in_(lead_ids)).all()} if lead_ids else {}
+    company_ids = {l.company_id for l in leads.values()}
+    companies = {x.id: x for x in db.query(Company).filter(
+        Company.id.in_(company_ids)).all()} if company_ids else {}
+    scores = crm_insights.lead_scores_for(
+        db, user.id, list(companies.values()))
+    sup_values = {v for (v,) in db.query(Suppression.value).filter(
+        Suppression.user_id == user.id).all()}
+    emails = [r.email for r in recs]
+    emailed = {e for (e,) in db.query(EmailMessage.to_email).filter(
+        EmailMessage.user_id == user.id,
+        EmailMessage.to_email.in_(emails),
+        EmailMessage.status.in_(["accepted", "delivered", "replied"]),
+        EmailMessage.is_test.is_(False)).distinct().all()} if emails else set()
+
     rows = []
     for r in recs:
-        lead = db.query(Lead).filter(Lead.id == r.lead_id).first()
-        company = db.query(Company).filter(
-            Company.id == lead.company_id).first() if lead else None
+        lead = leads.get(r.lead_id)
+        company = companies.get(lead.company_id) if lead else None
+        score = scores.get(lead.company_id) if lead else None
+        name = company.name if company else ""
+        country = company.country if company else ""
         rows.append({
             "lead_id": r.lead_id,
-            "company": company.name if company else "",
+            "company": name,
             "to_email": r.email, "status": r.status,
-            "subject": personalize(c.subject, company.name if company else "",
-                                   company.country if company else "", r.email),
-            "body": personalize(c.body, company.name if company else "",
-                                company.country if company else "", r.email),
+            "error": r.error,
+            "subject": personalize(c.subject, name, country, r.email),
+            "body": personalize(c.body, name, country, r.email),
+            # honest per-recipient risk signals (persisted rows only)
+            "lead_score": score["score"] if score else None,
+            "band": score["band"] if score else None,
+            "previously_contacted": r.email in emailed,
+            "suppressed": r.email in sup_values,
         })
     from app.emailing import get_provider_for_user
     provider = get_provider_for_user(user)
+    pending = sum(1 for r in rows if r["status"] == "PENDING")
+    blocked = sum(1 for r in rows
+                  if r["status"] == "PENDING"
+                  and (r["suppressed"] or r["previously_contacted"]))
     return {"id": c.id, "name": c.name, "status": c.status,
             "provider": provider.name,
             "provider_connected": (
@@ -121,6 +225,16 @@ def campaign_preview(campaign_id: int, db: Session = Depends(get_db),
                           or (settings.RESEND_API_KEY and settings.RESEND_FROM))
                 or (settings.EMAIL_PROVIDER == "gmail" and bool(user.gmail_refresh_token))),
             "recipient_count": len(rows), "recipients": rows,
+            # exact numbers for the double-confirm dialog:
+            # recipient_count_ack must equal pending_count
+            "pending_count": pending,
+            # what a send would really do right now (send-time guard applies)
+            "sendable_count": pending - blocked,
+            "blocked_count": blocked,
+            "send_note": (
+                "Suppressed and already-contacted recipients are skipped at "
+                "send time even if they appear here — nothing is ever "
+                "re-mailed."),
             "daily_quota": {"used": emails_sent_today(db, user.id),
                             "limit": settings.DAILY_EMAIL_LIMIT}}
 
@@ -173,6 +287,12 @@ def campaign_send(campaign_id: int, payload: CampaignSend,
     pending = db.query(CampaignRecipient).filter(
         CampaignRecipient.campaign_id == c.id,
         CampaignRecipient.status == "PENDING").count()
+    if pending == 0:
+        # Nothing queued (all already sent/suppressed/failed): never report
+        # a fake successful send.
+        raise HTTPException(
+            status_code=409,
+            detail="No pending recipients — nothing to send")
     if not payload.confirm or payload.recipient_count_ack != pending:
         raise HTTPException(
             status_code=422,

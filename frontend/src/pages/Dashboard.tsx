@@ -4,12 +4,39 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell,
 } from 'recharts';
-import { Building2, Mail, Send, MessageSquare, ArrowUpRight, MoreHorizontal } from 'lucide-react';
-import { overview, trends, listCompanies, listFollowups } from '../lib/api';
+import { Building2, Mail, Send, MessageSquare, ArrowUpRight, MoreHorizontal, Target, Flame } from 'lucide-react';
+import { overview, trends, listCompanies, listFollowups, analyticsFunnel, crmPipeline } from '../lib/api';
 import { useAuth } from '../auth';
 
 interface Ov { [k: string]: number }
 interface Day { date: string; discovered: number; sent: number }
+interface Stage { key: string; label: string; count: number; pct_of_previous: number | null; pct_of_first: number | null }
+interface Funnel {
+  stages: Stage[];
+  rates: {
+    delivery_rate_pct: number | null; reply_rate_pct: number | null;
+    bounce_rate_pct: number | null; followups_due: number;
+    denominators: { attempted: number; delivered: number; bounced: number; replies: number };
+  };
+  note: string;
+}
+interface Band { band: string; count: number; pct: number | null }
+interface Pipeline {
+  scope: { scored_companies: number; companies_in_scope: number; sampled: boolean };
+  lead_score_bands: Band[];
+  research_coverage: { pct_evidence: number | null; pct_evaluation: number | null };
+  contact_coverage: { pct_email: number | null };
+  lead_score_note: string;
+}
+
+// null means "no denominator" — render an em dash, NEVER a fake 0%.
+const pctOrDash = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${v}%`);
+const BAND_STYLE: Record<string, string> = {
+  Hot: 'bg-rose-100 text-rose-700 border-rose-200',
+  Warm: 'bg-amber-100 text-amber-700 border-amber-200',
+  Nurture: 'bg-sky-100 text-sky-700 border-sky-200',
+  Low: 'bg-gray-100 text-gray-600 border-gray-200',
+};
 
 function deltaBadge(cur: number, prev: number) {
   if (prev <= 0) return cur > 0 ? <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">new</span> : null;
@@ -30,6 +57,8 @@ export default function Dashboard() {
   const [recent, setRecent] = useState<{ id: number; name: string; emails: string[]; lead_status: string; updated_at?: string }[]>([]);
   const [due, setDue] = useState<{ id: number; lead_id: number; company: string | null; scheduled_at: string }[]>([]);
   const [activity, setActivity] = useState<{ type: string; message_id: number; at: string }[]>([]);
+  const [funnel, setFunnel] = useState<Funnel | null>(null);
+  const [pipeline, setPipeline] = useState<Pipeline | null>(null);
 
   useEffect(() => {
     overview(30).then((o) => {
@@ -39,6 +68,8 @@ export default function Dashboard() {
     trends(30).then((t) => setDaily(t.daily)).catch(() => {});
     listCompanies({ page: 1, page_size: 5 }).then((d) => setRecent(d.items)).catch(() => {});
     listFollowups().then((f) => setDue(f.filter((x: { status: string }) => x.status === 'SCHEDULED').slice(0, 5))).catch(() => {});
+    analyticsFunnel().then(setFunnel).catch(() => {});
+    crmPipeline().then(setPipeline).catch(() => {});
   }, []);
 
   const sum = (arr: Day[], k: 'discovered' | 'sent', from: number, to: number) =>
@@ -87,6 +118,77 @@ export default function Dashboard() {
           </div>
         ))}
       </div>
+
+      {/* Conversion funnel + lead-score bands (persisted rows only) */}
+      {(funnel || pipeline) && (
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+          <div className="rounded-2xl border border-gray-200/70 bg-white p-4 shadow-sm xl:col-span-2">
+            <div className="flex items-center justify-between">
+              <h2 className="flex items-center gap-1.5 text-sm font-bold text-gray-900">
+                <Target className="h-3.5 w-3.5 text-primary-500" /> Conversion Funnel
+              </h2>
+              <Link to="/analytics" className="text-[11px] font-semibold text-primary-600">View all</Link>
+            </div>
+            {funnel ? (
+              <div className="mt-3 space-y-2">
+                {funnel.stages.map((s, i) => {
+                  const first = funnel.stages[0]?.count ?? 0;
+                  const w = first > 0 ? Math.max(3, Math.round((s.count / first) * 100)) : 3;
+                  return (
+                    <div key={s.key} className="flex items-center gap-3">
+                      <span className="w-40 shrink-0 truncate text-[11px] font-medium text-gray-600" title={s.label}>{s.label}</span>
+                      <div className="h-5 flex-1 overflow-hidden rounded-full bg-gray-100">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-primary-500 to-primary-600 transition-all"
+                          style={{ width: `${w}%` }}
+                        />
+                      </div>
+                      <span className="w-12 shrink-0 text-right text-[12px] font-bold text-gray-900">{s.count.toLocaleString()}</span>
+                      <span className="w-14 shrink-0 text-right text-[11px] text-gray-400">
+                        {i === 0 ? '—' : pctOrDash(s.pct_of_previous)}
+                      </span>
+                    </div>
+                  );
+                })}
+                <div className="flex items-center justify-between border-t border-gray-100 pt-2 text-[11px] text-gray-400">
+                  <span>Each stage is a subset of the one above · rates are “—” until something is sent</span>
+                  <span className="font-semibold text-gray-500">
+                    {funnel.rates.denominators.attempted} attempted · reply {pctOrDash(funnel.rates.reply_rate_pct)}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <p className="mt-3 text-xs text-gray-400">Loading funnel…</p>
+            )}
+          </div>
+
+          <div className="rounded-2xl border border-gray-200/70 bg-white p-4 shadow-sm">
+            <h2 className="flex items-center gap-1.5 text-sm font-bold text-gray-900">
+              <Flame className="h-3.5 w-3.5 text-amber-500" /> Lead Score Bands
+            </h2>
+            {pipeline ? (
+              <>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  {pipeline.lead_score_bands.map((b) => (
+                    <div key={b.band} className={`rounded-xl border p-2.5 text-center ${BAND_STYLE[b.band] || 'bg-gray-100 text-gray-600 border-gray-200'}`}>
+                      <p className="text-lg font-bold">{b.count.toLocaleString()}</p>
+                      <p className="text-[10px] font-bold uppercase tracking-wide">{b.band}</p>
+                      <p className="text-[10px] opacity-70">{pctOrDash(b.pct)}</p>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-2 text-[10px] leading-relaxed text-gray-400">{pipeline.lead_score_note}</p>
+                <div className="mt-2 flex items-center justify-between text-[11px] text-gray-500">
+                  <span>{pipeline.research_coverage.pct_evidence === null ? '—' : `${pipeline.research_coverage.pct_evidence}%` } researched</span>
+                  <span>{pipeline.contact_coverage.pct_email === null ? '—' : `${pipeline.contact_coverage.pct_email}%` } with email</span>
+                </div>
+              </>
+            ) : (
+              <p className="mt-3 text-xs text-gray-400">Loading bands…</p>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
         {/* Pipeline chart */}

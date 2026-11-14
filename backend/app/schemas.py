@@ -88,6 +88,12 @@ class CampaignCreate(BaseModel):
     allow_resend: bool = False
     followup_enabled: bool = False
     followup_delay_hours: int = Field(default=24, ge=1, le=168)
+    # Audience filters (persisted research only — never guessed):
+    # keep only companies with saved research evidence / an evaluation run.
+    require_research: bool = False
+    # Keep only companies whose latest persisted buyer-fit score >= this
+    # (0-100). No evaluation = fit unproven = excluded, counted honestly.
+    min_buyer_fit: int | None = Field(default=None, ge=0, le=100)
 
 
 class CampaignSend(BaseModel):

@@ -1,8 +1,13 @@
 import { useState, useEffect } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Flame } from 'lucide-react';
 import { getCompany } from '../lib/api';
 
+interface Factor { key: string; label: string; points: number; max: number; reason: string }
+interface Score {
+  score: number; max: number; band: string; factors: Factor[];
+  engine: string; ai_generated: boolean; note: string;
+}
 interface C {
   id: number; name: string; product_summary: string | null; country: string | null;
   city: string | null; website: string | null; category: string | null;
@@ -13,6 +18,51 @@ interface C {
   leads: { id: number; status: string; score: number }[];
   email_history: { id: number; to_email: string; subject: string | null; status: string; sent_at: string | null }[];
   crawl_history: { id: number; status: string; pages_visited: number }[];
+  lead_score: Score | null;
+  has_research: boolean;
+  lead_score_note: string | null;
+}
+
+const BAND_BADGE: Record<string, string> = {
+  Hot: 'bg-rose-100 text-rose-700',
+  Warm: 'bg-amber-100 text-amber-700',
+  Nurture: 'bg-sky-100 text-sky-700',
+  Low: 'bg-gray-100 text-gray-600',
+};
+
+function LeadScoreCard({ c }: { c: C }) {
+  const s = c.lead_score;
+  if (!s) return null;
+  // The factors must sum EXACTLY to the displayed score (backend contract);
+  // if they ever don't, show the computed sum rather than a wrong headline.
+  const sum = s.factors.reduce((a, f) => a + f.points, 0);
+  const consistent = Math.abs(sum - s.score) < 0.051;
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between">
+        <h2 className="flex items-center gap-1.5 font-semibold"><Flame className="h-4 w-4 text-amber-500" /> Lead score</h2>
+        <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${BAND_BADGE[s.band] || 'bg-gray-100 text-gray-600'}`}>
+          {s.band} · {consistent ? s.score : sum}/{s.max}
+        </span>
+      </div>
+      <ul className="mt-3 space-y-2 text-sm">
+        {s.factors.map((f) => (
+          <li key={f.key} className="rounded-lg border border-gray-100 p-2">
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-gray-700">{f.label}</span>
+              <span className="text-xs font-bold text-gray-900">{f.points}/{f.max}</span>
+            </div>
+            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-100">
+              <div className="h-full rounded-full bg-primary-500" style={{ width: `${Math.round((f.points / f.max) * 100)}%` }} />
+            </div>
+            <p className="mt-1 text-[11px] leading-relaxed text-gray-400">{f.reason}</p>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-[11px] text-gray-400">{c.lead_score_note}</p>
+      <p className="mt-1 text-[10px] text-gray-300">engine: {s.engine} · ai_generated: {String(s.ai_generated)}</p>
+    </div>
+  );
 }
 
 export default function CompanyDetail() {
@@ -26,6 +76,12 @@ export default function CompanyDetail() {
     <div className="space-y-4">
       <Link to="/companies" className="inline-flex items-center gap-1 text-sm text-primary-600"><ArrowLeft className="h-4 w-4" /> Companies</Link>
       <h1 className="text-2xl font-bold text-gray-900">{c.name}</h1>
+      {!c.has_research && (
+        <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">
+          No saved research for this company yet — the score below reflects only stored contacts and profile data, not buying intent.
+        </p>
+      )}
+      <LeadScoreCard c={c} />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="card">
           <h2 className="font-semibold">Profile</h2>
