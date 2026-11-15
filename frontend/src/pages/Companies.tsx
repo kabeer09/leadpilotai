@@ -12,7 +12,7 @@ const BAND_BADGE: Record<string, string> = {
 
 export default function Companies() {
   const [params] = useSearchParams();
-  const [items, setItems] = useState<{ id: number; name: string; country: string | null; website: string | null; emails: string[]; phones: string[]; lifecycle: string; lead_status: string; category: string | null; lead_score: { score: number; band: string } | null; has_research: boolean }[]>([]);
+  const [items, setItems] = useState<{ id: number; name: string; country: string | null; website: string | null; emails: string[]; phones: string[]; lifecycle: string; lead_status: string; category: string | null; lead_score: { score: number; band: string } | null; has_research: boolean; fair: { id: number; name: string | null; url: string | null } | null }[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState(params.get('q') || '');
@@ -143,6 +143,11 @@ export default function Companies() {
                 <tr key={c.id} className="hover:bg-gray-50">
                   <td className="table-td">
                     <Link to={`/companies/${c.id}`} className="font-medium text-primary-600">{c.name}</Link>
+                    {c.fair && (
+                      <p className="text-[10px] text-gray-400">
+                        {c.fair.name || 'trade fair'} · exhibitor
+                      </p>
+                    )}
                     {c.website && <p className="text-xs text-gray-400">{c.website}</p>}
                     {!c.has_research && <p className="text-[10px] text-gray-300">no research yet</p>}
                   </td>

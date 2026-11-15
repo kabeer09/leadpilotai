@@ -12,6 +12,7 @@ interface C {
   id: number; name: string; product_summary: string | null; country: string | null;
   city: string | null; website: string | null; category: string | null;
   profile_url: string | null; lifecycle: string; lead_status: string;
+  fair: { id: number; name: string | null; url: string | null } | null;
   hall: string | null; booth: string | null; address: string | null;
   products: { name: string; category: string }[];
   contacts: { id: number; kind: string; value: string; source_url: string | null; source_page: string | null; verification: string }[];
@@ -28,6 +29,19 @@ const BAND_BADGE: Record<string, string> = {
   Warm: 'bg-amber-100 text-amber-700',
   Nurture: 'bg-sky-100 text-sky-700',
   Low: 'bg-gray-100 text-gray-600',
+};
+
+const hostOf = (u: string | null | undefined): string => {
+  if (!u) return '';
+  try { return new URL(u.startsWith('http') ? u : `https://${u}`).hostname.replace(/^www\./, ''); } catch { return ''; }
+};
+
+// A "website" hosted on the fair's own domain is a fair listing page, not the
+// company's site — label it honestly instead of presenting it as their web presence.
+const isFairDomain = (c: C): boolean => {
+  const w = hostOf(c.website);
+  if (!w) return false;
+  return w === hostOf(c.profile_url) || w === hostOf(c.fair?.url);
 };
 
 function LeadScoreCard({ c }: { c: C }) {
@@ -86,13 +100,46 @@ export default function CompanyDetail() {
         <div className="card">
           <h2 className="font-semibold">Profile</h2>
           <dl className="mt-2 space-y-1 text-sm">
-            <div><dt className="inline text-gray-500">Website: </dt><dd className="inline">{c.website ? <a href={c.website.startsWith('http') ? c.website : `https://${c.website}`} target="_blank" rel="noreferrer" className="text-primary-600">{c.website}</a> : '—'}</dd></div>
+            {c.fair && (
+              <div>
+                <dt className="inline text-gray-500">Fair: </dt>
+                <dd className="inline">
+                  {c.fair.url
+                    ? <a href={c.fair.url} target="_blank" rel="noreferrer" className="text-primary-600">{c.fair.name || c.fair.url}</a>
+                    : c.fair.name || '—'}
+                  <span className="ml-2 text-xs text-gray-400">exhibitor directory entry</span>
+                </dd>
+              </div>
+            )}
+            <div>
+              <dt className="inline text-gray-500">{isFairDomain(c) ? 'Listing URL: ' : 'Website: '}</dt>
+              <dd className="inline">{c.website
+                ? <a href={c.website.startsWith('http') ? c.website : `https://${c.website}`} target="_blank" rel="noreferrer" className="text-primary-600">{c.website}</a>
+                : '—'}
+                {isFairDomain(c) && <span className="ml-2 text-xs text-amber-600">fair page — no own site recorded</span>}
+              </dd>
+            </div>
+            {c.profile_url && (
+              <div>
+                <dt className="inline text-gray-500">Fair listing: </dt>
+                <dd className="inline">
+                  <a href={c.profile_url} target="_blank" rel="noreferrer" className="text-primary-600">View exhibitor page ↗</a>
+                </dd>
+              </div>
+            )}
             <div><dt className="inline text-gray-500">Location: </dt><dd className="inline">{[c.city, c.country].filter(Boolean).join(', ') || '—'}</dd></div>
             <div><dt className="inline text-gray-500">Category: </dt><dd className="inline">{c.category || '—'}</dd></div>
             {(c.hall || c.booth) && <div><dt className="inline text-gray-500">Stand: </dt><dd className="inline">{[c.hall, c.booth].filter(Boolean).join(' · ')}</dd></div>}
             {c.address && <div><dt className="inline text-gray-500">Address: </dt><dd className="inline">{c.address}</dd></div>}
             <div><dt className="inline text-gray-500">Lifecycle: </dt><dd className="inline">{c.lifecycle}</dd></div>
           </dl>
+          {c.fair && (
+            <p className="mt-2 text-[11px] leading-relaxed text-gray-400">
+              Source: {c.fair.name || 'trade-fair exhibitor directory'} — a directory listing
+              confirms participation at that fair only; it is not evidence of current
+              buying or selling activity.
+            </p>
+          )}
           {c.product_summary && <p className="mt-3 text-sm text-gray-700">{c.product_summary}</p>}
           {c.products && c.products.length > 0 && (
             <div className="mt-3">

@@ -398,6 +398,12 @@ export default function Exhibitors() {
                         {it.website.replace(/^https?:\/\//, '').slice(0, 40)}
                       </a>
                     )}
+                    {it.profile_url && (
+                      <a href={it.profile_url} target="_blank" rel="noreferrer"
+                         className="block text-[10px] text-primary-500 hover:text-primary-700">
+                        fair listing ↗
+                      </a>
+                    )}
                   </td>
                   <td className="table-td max-w-[140px] truncate text-xs text-gray-500"
                       title={it.fair || ''}>{it.fair || '—'}</td>

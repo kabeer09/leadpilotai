@@ -104,6 +104,10 @@ def list_companies(
     total = q.count()
     rows = q.offset((page - 1) * page_size).limit(page_size).all()
     cmap = _contact_map(db, [c.id for c in rows])
+    # source attribution for the page (one query, only this page's sources)
+    src_ids = {c.source_id for c in rows if c.source_id}
+    smap = ({s.id: s for s in db.query(Source).filter(Source.id.in_(src_ids))}
+            if src_ids else {})
     scores = crm_insights.lead_scores_for(db, user.id, rows)
     researched = crm_insights.research_flags_for(
         db, user.id, [c.id for c in rows])
@@ -120,7 +124,11 @@ def list_companies(
             "lead_status": c.lead_status, "confidence": c.confidence,
             "emails": emails, "phones": phones,
             "contact_complete": bool(emails or phones),
-            "source_id": c.source_id, "updated_at": c.updated_at,
+            "source_id": c.source_id,
+            "fair": ({"id": c.source_id, "name": smap[c.source_id].name,
+                      "url": smap[c.source_id].url}
+                     if c.source_id in smap else None),
+            "updated_at": c.updated_at,
             # persisted-only scoring: never a live call, never a guess
             "lead_score": ({"score": sc["score"], "band": sc["band"]}
                            if sc else None),
@@ -172,10 +180,14 @@ def get_company(company_id: int, db: Session = Depends(get_db),
             EmailMessage.lead_id.in_(lead_ids)).order_by(
             EmailMessage.created_at.desc()).limit(50).all()
     crawls = []
+    src = None
     if c.source_id:
         crawls = db.query(CrawlJob).filter(
             CrawlJob.user_id == user.id, CrawlJob.source_id == c.source_id).order_by(
             CrawlJob.id.desc()).limit(10).all()
+        s = db.query(Source).filter(Source.id == c.source_id).first()
+        if s:
+            src = {"id": s.id, "name": s.name, "url": s.url}
     import json as _json
     try:
         products = _json.loads(c.products_json) if c.products_json else []
@@ -189,6 +201,7 @@ def get_company(company_id: int, db: Session = Depends(get_db),
         "id": c.id, "name": c.name, "product_summary": c.product_summary,
         "country": c.country, "city": c.city, "website": c.website,
         "category": c.category, "profile_url": c.profile_url,
+        "fair": src,
         "hall": c.hall, "booth": c.booth, "address": c.address,
         "products": products,
         "lifecycle": c.lifecycle, "lead_status": c.lead_status,
