@@ -21,6 +21,7 @@ from app.deps import get_current_user, audit, rate_limit
 from app.config import settings
 from app.agents import (run_research_pipeline, research_and_persist,
                         research_company_website, qualify_buyer,
+                        merge_persisted_contacts,
                         generate_outreach_draft)
 
 router = APIRouter(prefix="/api", tags=["research"])
@@ -409,6 +410,7 @@ def generate_draft(
 
     from app.config import settings as cfg_settings
     research = research_company_website(company, db)
+    merge_persisted_contacts(db, user.id, company, research)
     qualification = qualify_buyer(company, research)
     gemini_key = payload.get("gemini_key") or cfg_settings.GEMINI_API_KEY
     draft = generate_outreach_draft(company, qualification, research, gemini_key)

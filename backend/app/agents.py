@@ -634,6 +634,65 @@ def persist_evaluation(db: Session, user_id: int, company_id: int,
     return row
 
 
+def merge_persisted_contacts(db: Session, user_id: int,
+                             company: Company, research: dict) -> None:
+    """Add already-persisted, sourced contacts to this run's research dict.
+
+    The research crawler visits a fixed page list, so contacts found by
+    an earlier crawl (e.g. the Business Lead Finder's website
+    enrichment) can sit on a page this run never reached. Those rows
+    already carry their own source_url in the contacts table, so
+    qualification must count them — otherwise a company with 30 saved
+    published emails would honestly-but-wrongly score as "No public
+    business email found". Only stored rows for this user+company are
+    merged (never invented); they are labelled with the extraction
+    method "persisted_contact" so their provenance stays visible.
+    """
+    from app.whatsapp import phone_e164
+
+    def _pkey(value: str) -> str:
+        e164, _how = phone_e164(value, company.country)
+        return e164 or normalize_phone(value) or value
+
+    seen_emails = {normalize_email(e.get("value") or "") or e.get("value")
+                   for e in research.get("emails", [])}
+    seen_phones = {_pkey(p.get("value") or "")
+                   for p in research.get("phones", [])}
+
+    rows = (db.query(Contact)
+            .filter(Contact.user_id == user_id,
+                    Contact.company_id == company.id,
+                    Contact.kind.in_(("EMAIL", "PHONE")))
+            .all())
+    for r in rows:
+        value = (r.value or "").strip()
+        if not value:
+            continue
+        source_url = r.source_url or research.get("website") or ""
+        if r.kind == "EMAIL":
+            key = normalize_email(value) or value
+            if key in seen_emails:
+                continue
+            seen_emails.add(key)
+            research.setdefault("emails", []).append({
+                "value": key,
+                "source_url": source_url,
+                "extraction_method": "persisted_contact",
+                "confidence": 0.8,
+            })
+        else:
+            key = _pkey(value)
+            if key in seen_phones:
+                continue
+            seen_phones.add(key)
+            research.setdefault("phones", []).append({
+                "value": value,
+                "source_url": source_url,
+                "extraction_method": "persisted_contact",
+                "confidence": 0.8,
+            })
+
+
 def research_and_persist(db: Session, user_id: int,
                          company: Company) -> dict:
     """Research a company website, validate + qualify, persist evidence
@@ -643,6 +702,7 @@ def research_and_persist(db: Session, user_id: int,
     Returns {research, qualification, validated, qc, evidence}.
     """
     research = research_company_website(company, db)
+    merge_persisted_contacts(db, user_id, company, research)
 
     validated: list[dict] = []
     for e in research.get("emails", []):
