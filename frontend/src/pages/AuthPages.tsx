@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { useAuth } from '../auth';
 import { login, signup, googleLoginUrl } from '../lib/api';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { GoogleButton } from './GoogleAuth';
 
 export function Login() {
   const { refresh } = useAuth();
+  const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
@@ -20,6 +21,7 @@ export function Login() {
       localStorage.setItem('lp_access', r.access_token);
       localStorage.setItem('lp_refresh', r.refresh_token);
       await refresh();
+      navigate('/');
     } catch (ex: unknown) {
       setErr((ex as { response?: { data?: { detail?: string } } }).response?.data?.detail || 'Login failed.');
     } finally {
@@ -55,6 +57,7 @@ export function Login() {
 
 export function Signup() {
   const { refresh } = useAuth();
+  const navigate = useNavigate();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -70,6 +73,7 @@ export function Signup() {
       localStorage.setItem('lp_access', r.access_token);
       localStorage.setItem('lp_refresh', r.refresh_token);
       await refresh();
+      navigate('/');
     } catch (ex: unknown) {
       setErr((ex as { response?: { data?: { detail?: string } } }).response?.data?.detail || 'Signup failed.');
     } finally {
