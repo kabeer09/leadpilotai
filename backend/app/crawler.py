@@ -402,7 +402,7 @@ def extract_page(url: str, html: str) -> dict:
 
 
 PROFILE_PATH_RE = re.compile(
-    r"/(exhibitor|exhibitors|company|companies|profile|profiles|listing|listings|"
+    r"/(exhibitor|exhibitors|a-z-exhibitors|company|companies|profile|profiles|listing|listings|"
     r"vendor|vendors|supplier|suppliers|member|members|brand|brands)/[^/?#]+"
     r"|/en/[a-z0-9-]+-\d+",
     re.IGNORECASE)
@@ -436,7 +436,13 @@ def _profile_links(data: dict, host: str) -> list[str]:
         # The slug must look like an entity id/slug, not a section index:
         # require a digit or a long slug (excludes /exhibitor/exhibitor-directory).
         slug = m.group(0).rstrip("/").split("/")[-1]
-        if not (re.search(r"\d", slug) or len(slug) > 12):
+        hyve = any(h in host for h in ("springfair.com", "autumnfair.com",
+                                       "homeandgift.co.uk",
+                                       "gleebirmingham.com"))
+        if not (re.search(r"\d", slug) or len(slug) > 12
+                # Hyve fairs also use short non-numeric slugs ("s-gifts")
+                or (hyve and len(slug) >= 2
+                    and slug.lower() not in INDEX_WORDS)):
             continue
         out.append(href.split("#")[0])
     return sorted(set(out))
@@ -464,6 +470,15 @@ def _looks_like_profile_url(url: str) -> bool:
     # Hometex: /en/<slug>-<digits> are all profile pages
     if "hometex.com.tr" in host and re.search(r"-\d+$", slug):
         return True
+    # Hyve UK fairs (Spring/Autumn/Home&Gift/Glee): every /exhibitors/<slug>
+    # and /a-z-exhibitors/<slug> page is a profile — slugs like "s-gifts"
+    # are short, and the generic >12 rule would drop them, making directory
+    # mode skip every sitemap-discovered exhibitor page.
+    if any(h in host for h in ("springfair.com", "autumnfair.com",
+                               "homeandgift.co.uk", "gleebirmingham.com")):
+        if re.search(r"/(?:exhibitors|a-z-exhibitors)/[^/]+/?$",
+                     urlparse(url).path or ""):
+            return len(slug) >= 2 and low not in INDEX_WORDS
     return len(slug) > 12 and not any(w in low for w in INDEX_WORDS)
 
 
@@ -969,6 +984,23 @@ def _merge_details(data: dict, det: dict | None) -> str:
                 data.setdefault("official_links", []).append(entry)
     if det.get("social"):
         data["social"] = {**det["social"], **(data.get("social") or {})}
+    # Directory-published description + product categories — fill-only: the
+    # crawled page's own text always wins when it exists (idempotent, the
+    # card re-merges after a render pass).
+    if det.get("description"):
+        if not data.get("profile_description"):
+            data["profile_description"] = det["description"]
+        if not data.get("description"):
+            data["description"] = det["description"]
+    if det.get("products") and not data.get("products"):
+        data["products"] = det["products"][:20]
+        if not data.get("products_json"):
+            import json as _j
+            data["products_json"] = _j.dumps(det["products"][:20])
+        if not data.get("industry"):
+            data["industry"] = ", ".join(
+                p.get("name", "") for p in det["products"]
+                if p.get("name"))[:255]
     tag = (f" +details:{len(det.get('emails', []))}e/"
            f"{len(det.get('phones', []))}p")
     if det.get("contact_names"):
@@ -977,6 +1009,10 @@ def _merge_details(data: dict, det: dict | None) -> str:
         tag += " +site"
     if det.get("social"):
         tag += f" +social:{len(det['social'])}"
+    if det.get("description"):
+        tag += " +desc"
+    if det.get("products"):
+        tag += f" +cats:{len(det['products'])}"
     return tag
 
 
@@ -1230,7 +1266,10 @@ def _ingest_adapter_records(db, job, records: list[dict],
     saved = 0
     enriched = 0
     with _hx.Client() as client:
-        for rec in records[:1500]:
+        # Cap is a safety net, not a policy: the largest event (Heimtextil)
+        # ships 2,515 full records — records themselves cost no page budget
+        # (only Stage-3 enrichment below does, still bounded by max_pages).
+        for rec in records[:6000]:
             if shared["cancel"].is_set():
                 break
             data = {
@@ -1309,6 +1348,41 @@ def _ingest_adapter_records(db, job, records: list[dict],
     return saved
 
 
+def _pending_profiles(db, user_id: int,
+                      profiles: list[str]) -> tuple[list[str], int]:
+    """Drop profiles whose row is already complete, keep the rest.
+
+    Complete rows re-crawl for free but would fill the queue slice on every
+    run, so newer exhibitors never got processed (the Atlanta 245/2,500
+    stall). Returns (pending_urls, already_complete_count); on any doubt it
+    returns the input unchanged (safe default = old behaviour)."""
+    try:
+        rows = (db.query(Company.id, Company.profile_url,
+                         Company.product_summary)
+                .filter(Company.user_id == user_id,
+                        Company.profile_url.isnot(None))
+                .all())
+        # company_is_complete = product_summary + a scraped EMAIL contact —
+        # checked in batched queries instead of one round-trip per row.
+        cands = [(r.id, (r.profile_url or "").rstrip("/")) for r in rows
+                 if (r.product_summary or "").strip() and r.profile_url]
+        ids = [c[0] for c in cands]
+        with_email: set[int] = set()
+        for i in range(0, len(ids), 500):
+            with_email.update(
+                cid for (cid,) in db.query(Contact.company_id).filter(
+                    Contact.company_id.in_(ids[i:i + 500]),
+                    Contact.kind == "EMAIL",
+                    Contact.verification == "scraped").all())
+        complete = {pu for cid, pu in cands if cid in with_email}
+        if not complete:
+            return profiles, 0
+        kept = [p for p in profiles if p.rstrip("/") not in complete]
+        return kept, len(profiles) - len(kept)
+    except Exception:
+        return profiles, 0
+
+
 def run_job(job_id: int, force_recrawl: bool = False) -> None:
     """Background crawl: adapter discovery (S1) + worker pool (S2/S3)."""
     from queue import Queue, Empty
@@ -1340,10 +1414,13 @@ def run_job(job_id: int, force_recrawl: bool = False) -> None:
             # profile-URL pages become companies from then on.
             "directory_mode": False,
         }
-        # Stage 1: full-record adapters (Ambiente: name/address/hall/
-        # products/email/phone per record), URL-list adapters (LVM), else seed.
+        # Stage 1: full-record adapters (Messe Frankfurt: name/address/hall/
+        # products/email/phone per record), URL-list adapters (LVM, Hyve
+        # sitemaps), else seed. user_id lets adapters skip rows this tenant
+        # already captured so re-runs continue instead of rebuilding.
         from app.fair_adapters import discover_profiles, discover_records
-        records, records_err = discover_records(seed_url, max_pages)
+        records, records_err = discover_records(seed_url, max_pages,
+                                                user_id=user_id)
         if records:
             with shared["lock"]:
                 shared["directory_mode"] = True
@@ -1357,15 +1434,24 @@ def run_job(job_id: int, force_recrawl: bool = False) -> None:
         profiles, adapter_err = (discover_profiles(seed_url)
                                  if not records else (None, None))
         if profiles:
+            # Re-runs must keep making progress: complete rows are skipped
+            # for free but would eat the whole queue slice, leaving every
+            # newer exhibitor unprocessed run after run. When everything is
+            # already complete, queue the originals so workers record the
+            # honest "all complete, nothing needed" outcome.
+            pending, n_done = _pending_profiles(db, user_id, profiles)
+            queued = (pending or profiles)[:max_pages * 2]
             with shared["lock"]:
                 shared["directory_mode"] = True
-                for href in profiles[:max_pages * 2]:
+                for href in queued:
                     if href not in shared["seen"]:
                         shared["seen"].add(href)
                         shared["queue"].put((href, 1))
             db.add(CrawlEvent(user_id=user_id, job_id=job_id, url=seed_url,
                               status="ok",
-                              detail=f"[S1] adapter: {len(profiles)} profiles queued"))
+                              detail=f"[S1] adapter: {len(profiles)} profiles "
+                                     f"found, {len(queued)} queued "
+                                     f"({n_done} already complete)"))
             db_commit_retry(db)
         else:
             if adapter_err:

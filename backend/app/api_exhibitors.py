@@ -397,7 +397,9 @@ def export_exhibitors(q: str | None = None, source_id: int | None = None,
 
 class ExtractIn(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
-    max_pages: int = Field(default=50, ge=1, le=500)
+    # Big directories (Heimtextil 2,515, Atlanta ~2,500) need more than one
+    # run at the old 500 cap; MAX_CRAWL_PAGES still bounds the actual crawl.
+    max_pages: int = Field(default=50, ge=1, le=5000)
 
 
 @router.post("/extract", status_code=201,

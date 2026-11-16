@@ -118,10 +118,12 @@ def parse_ambiente_record(ex: dict, url: str, seed_url: str) -> dict | None:
 
 
 def _ambiente_records(seed_url: str) -> tuple[list[dict] | None, str | None]:
-    """Ambiente/Messe Frankfurt: full exhibitor records via the public search API.
+    """Messe Frankfurt events (Ambiente, Heimtextil, Christmasworld,
+    Creativeworld): full exhibitor records via the public search API.
 
-    Each record already carries name, address, hall/booth, description,
-    products, categories, email, phone and homepage — stages 1+2 in one.
+    The event is derived from the seed's sub-domain; each record already
+    carries name, address, hall/booth, description, products, categories,
+    email, phone and homepage — stages 1+2 in one.
     Returns (records, error); records map to the generic extractor schema.
     """
     import html as _html
@@ -129,19 +131,29 @@ def _ambiente_records(seed_url: str) -> tuple[list[dict] | None, str | None]:
     from urllib.parse import urlparse as _up, parse_qs as _pqs
     api = ("https://api.messefrankfurt.com/service/esb_api/exhibitor-service"
            "/api/2.1/public/exhibitor/search")
+    host = (_up(seed_url).hostname or "").lower()
+    # One public API serves every Messe Frankfurt event — the event is the
+    # site's sub-domain (ambiente / heimtextil / christmasworld /
+    # creativeworld). Verified: same records, same field shape.
+    sub = host.split(".messefrankfurt.com", 1)[0] \
+        if "messefrankfurt.com" in host else ""
+    event = {"ambiente": "AMBIENTE", "heimtextil": "HEIMTEXTIL",
+             "christmasworld": "CHRISTMASWORLD",
+             "creativeworld": "CREATIVEWORLD"}.get(sub, "AMBIENTE")
     headers = {"User-Agent": UA, "Accept": "application/json, text/plain, */*",
-               "Referer": "https://ambiente.messefrankfurt.com/",
+               "Referer": f"https://{host}/" if host
+               else "https://ambiente.messefrankfurt.com/",
                "apikey": "LXnMWcYQhipLAS7rImEzmZ3CkrU033FMha9cwVSngG4vbufTsAOCQQ=="}
     try:
         qs = _pqs(_up(seed_url).query)
-        page_size = max(1, min(100, int((qs.get("pagesize") or ["30"])[0])))
+        page_size = max(1, min(100, int((qs.get("pagesize") or ["100"])[0])))
     except Exception:
-        page_size = 30
+        page_size = 100
 
     def page_url(n: int) -> str:
         return (f"{api}?language=en-GB&q=&orderBy=name&pageNumber={n}"
                 f"&pageSize={page_size}&orSearchFallback=false"
-                f"&showJumpLabels=true&findEventVariable=AMBIENTE")
+                f"&showJumpLabels=true&findEventVariable={event}")
 
     def clean(s) -> str:
         s = _html.unescape(str(s or ""))
@@ -153,7 +165,7 @@ def _ambiente_records(seed_url: str) -> tuple[list[dict] | None, str | None]:
     def fetch_all(get) -> tuple[list[dict], dict]:
         records: list[dict] = []
         page, total = 1, None
-        while page <= 60:
+        while page <= 300:   # Heimtextil: 2,515 records @100/page = 26 pages
             try:
                 r = get(page_url(page))
             except Exception as e:
@@ -167,7 +179,8 @@ def _ambiente_records(seed_url: str) -> tuple[list[dict] | None, str | None]:
             result = payload.get("result") or {}
             if total is None:
                 meta = result.get("metaData") or {}
-                total = meta.get("totalHits", meta.get("total"))
+                total = meta.get("hitsTotal",
+                                 meta.get("totalHits", meta.get("total")))
             hits = result.get("hits") or []
             if not hits:
                 break
@@ -185,10 +198,10 @@ def _ambiente_records(seed_url: str) -> tuple[list[dict] | None, str | None]:
         with httpx.Client(timeout=25.0, headers=headers) as client:
             records, info = fetch_all(client.get)
             if records or "error" not in info:
-                logger.info(f"Ambiente: {len(records)} records (direct API)")
+                logger.info(f"{event}: {len(records)} records (direct API)")
                 return (records or [], None) if records else (None, "API returned no exhibitors")
     except Exception as e:
-        logger.warning(f"Ambiente direct API failed ({str(e)[:100]}), trying browser session")
+        logger.warning(f"{event} direct API failed ({str(e)[:100]}), trying browser session")
     # Fallback: one browser visit to establish session cookies, then API
     try:
         from playwright.sync_api import sync_playwright
@@ -208,11 +221,11 @@ def _ambiente_records(seed_url: str) -> tuple[list[dict] | None, str | None]:
             finally:
                 browser.close()
         if records:
-            logger.info(f"Ambiente: {len(records)} records (browser session)")
+            logger.info(f"{event}: {len(records)} records (browser session)")
             return records, None
         return None, info.get("error", "API returned no exhibitors")
     except Exception as e:
-        return None, f"Ambiente adapter failed: {str(e)[:150]}"
+        return None, f"{event} adapter failed: {str(e)[:150]}"
 
 
 def _lasvegas_profiles() -> tuple[list[str], str | None]:
@@ -239,10 +252,12 @@ def fetch_exhibitor_details(page_url: str) -> dict | None:
     """Full contact card for one ANDMORE exhibitor page via OpenDetails.
 
     Returns {emails, phones, contact_names, address, booth, company_name,
-    city, country, website, social} with the profile URL as provenance, or
-    None (not ANDMORE / no match / error). One fast JSON call (~1s), polite
-    delay included. `website` is the exhibitor's OWN site (not the fair's
-    domain); `social` maps platform -> URL from the directory's socialMedia.
+    city, country, website, social, description, products} with the profile
+    URL as provenance, or None (not ANDMORE / no match / error). One fast
+    JSON call (~1s), polite delay included. `website` is the exhibitor's OWN
+    site (not the fair's domain); `social` maps platform -> URL from the
+    directory's socialMedia; `description`/`products` are the directory's
+    own published text and checked product categories.
     """
     import re as _re2
     global ANDMORE_PROFILE_RE
@@ -313,6 +328,20 @@ def fetch_exhibitor_details(page_url: str) -> dict | None:
             website = (info.get("companyWebsiteUrl") or "").strip()
             if website and not website.startswith(("http://", "https://")):
                 website = "https://" + website
+            # Directory-published company description + product categories
+            # (the page hides both behind interaction — this is the
+            # directory's own text about this exhibitor, not a guess).
+            desc = str(info.get("completeDescription")
+                       or info.get("briefDescription") or "").strip()
+            products: list[dict] = []
+            for pc in (row.get("productCategories") or []):
+                cat = ((pc or {}).get("category") or {}) \
+                    if isinstance(pc, dict) else {}
+                if not cat.get("checked"):
+                    continue   # only categories the directory marks selected
+                nm = str(cat.get("name") or "").strip()
+                if nm:
+                    products.append({"name": nm[:200], "category": ""})
             country = (ci.get("country") or "").strip()
             # `country` is a numeric code; the readable name lives in
             # countries[].displayValue (take the checked/first one).
@@ -332,14 +361,16 @@ def fetch_exhibitor_details(page_url: str) -> dict | None:
                 if _v.startswith("http"):
                     social[_sk] = _v
             if not emails and not phones and not address and not booth \
-                    and not company_name:
+                    and not company_name and not desc:
                 return None
             return {"emails": emails, "phones": phones,
                     "contact_names": names,
                     "address": address or None, "booth": booth or None,
                     "company_name": company_name,
                     "city": city or None, "country": country or None,
-                    "website": website or None, "social": social or None}
+                    "website": website or None, "social": social or None,
+                    "description": desc[:2000] or None,
+                    "products": products}
     except Exception as e:
         logger.warning(f"OpenDetails {eid} failed: {str(e)[:100]}")
         return None
@@ -538,8 +569,26 @@ def _hp_drop_owner_socials(parsed: list[dict]) -> None:
             if freq.get(re.sub(r"[^a-z0-9]", "", u.lower()), 0) < thresh}
 
 
+def _captured_profile_urls(user_id: int) -> set[str]:
+    """Profile URLs this tenant already has a row for (any completeness).
+
+    Lazy imports: this module must stay importable without the app stack."""
+    from app.database import SessionLocal
+    from app.models import Company
+    db = SessionLocal()
+    try:
+        rows = (db.query(Company.profile_url)
+                .filter(Company.user_id == user_id,
+                        Company.profile_url.isnot(None))
+                .all())
+        return {(r[0] or "").rstrip("/") for r in rows if r[0]}
+    finally:
+        db.close()
+
+
 def _highpoint_records(_seed_url: str,
-                       max_pages: int | None = None
+                       max_pages: int | None = None,
+                       user_id: int | None = None
                        ) -> tuple[list[dict] | None, str | None]:
     """High Point Market: full exhibitor records from the public directory.
 
@@ -547,11 +596,26 @@ def _highpoint_records(_seed_url: str,
     /exhibitor/{id} profile via parse_highpoint_profile. max_pages caps how
     MANY exhibitors are built (it is the job's page budget; discovery itself
     is unbilled, and the per-record Stage-3 enrichment is billed separately
-    by _ingest_adapter_records)."""
+    by _ingest_adapter_records). Re-runs pass user_id so profiles this
+    tenant already captured are skipped — otherwise every run rebuilt the
+    same first N profiles and the directory never finished (472/1,761)."""
     urls, err = _highpoint_profiles()
     if not urls:
         return None, err or "High Point directory returned no exhibitor profiles"
-    limit = max(1, min(int(max_pages or 1500), 1500))
+    limit = max(1, min(int(max_pages or 1500), 2000))
+    if user_id:
+        try:
+            done = _captured_profile_urls(user_id)
+        except Exception:
+            done = set()
+        if done:
+            fresh = [u for u in urls if u.rstrip("/") not in done]
+            logger.info(f"High Point: {len(urls) - len(fresh)} of "
+                        f"{len(urls)} profiles already captured — "
+                        f"re-run continues at {len(fresh)} remaining")
+            urls = fresh or urls   # all captured: one run may revisit (honest no-op)
+    if not urls:
+        return None, "all High Point profiles are already captured"
 
     parsed: list[dict] = []
     with httpx.Client(timeout=30.0, headers={"User-Agent": UA},
@@ -605,25 +669,63 @@ def _hometex_profiles() -> tuple[list[str], str | None]:
         return None, f"Hometex adapter failed: {str(e)[:150]}"
 
 
-def _springfair_profiles() -> tuple[list[str], str | None]:
-    """Spring Fair (UK): exhibitor listing page."""
-    base = "https://www.springfair.com"
+def _hyve_sitemap_profiles(base: str) -> tuple[list[str], str | None]:
+    """Hyve UK fairs (Spring Fair, Autumn Fair, Home & Gift, Glee): every
+    profile via the exhibitor sitemap.
+
+    The HTML listing pages server-render only ~20 random profiles (the A-Z
+    filter never pages server-side), which capped previous crawls at a
+    handful — sitemap_exhibitors.xml lists ALL of them (1,089 / 595 / 417 /
+    439 verified)."""
+    base = base.rstrip("/")
+    profile_re = re.compile(
+        r"/(?:exhibitors|a-z-exhibitors)/[a-z0-9][a-z0-9-]*/?$", re.I)
     try:
-        with httpx.Client(timeout=25.0,
-                          headers={"User-Agent": UA}) as client:
-            r = client.get(f"{base}/exhibitors")
+        with httpx.Client(timeout=25.0, headers={"User-Agent": UA},
+                          follow_redirects=True) as client:
+            r = client.get(f"{base}/sitemap.xml")
             if r.status_code != 200:
-                return None, f"exhibitor list HTTP {r.status_code}"
+                return None, f"sitemap index HTTP {r.status_code}"
+            children = [loc.strip() for loc in
+                        re.findall(r"<loc>([^<]+)</loc>", r.text)
+                        if "exhibitor" in loc.lower()]
+            if not children:
+                return None, "no exhibitor sitemap in the sitemap index"
             seen: set[str] = set()
-            for m in re.finditer(r'href="(/?exhibitors/[a-z0-9-]+)"', r.text):
-                path = m.group(1)
-                if not path.startswith('/'):
-                    path = '/' + path
-                seen.add(base + path)
+            for sm in children:
+                try:
+                    r2 = client.get(sm)
+                except Exception:
+                    continue
+                if r2.status_code != 200:
+                    continue
+                for loc in re.findall(r"<loc>([^<]+)</loc>", r2.text):
+                    path = re.sub(r"[?#].*$", "", loc.strip())
+                    path = re.sub(r"^https?://[^/]+", "", path)
+                    # profile pages only — never the /exhibitors list root
+                    if profile_re.search(path):
+                        seen.add(base + path)
+                time.sleep(0.4)   # polite across child sitemaps
             urls = sorted(seen)
-            return (urls, None) if urls else (None, "no profile links found")
+            return (urls, None) if urls else (None, "no profile links in sitemap")
     except Exception as e:
-        return None, f"Spring Fair adapter failed: {str(e)[:150]}"
+        return None, f"exhibitor sitemap adapter failed: {str(e)[:150]}"
+
+
+def _springfair_profiles() -> tuple[list[str], str | None]:
+    return _hyve_sitemap_profiles("https://www.springfair.com")
+
+
+def _autumnfair_profiles() -> tuple[list[str], str | None]:
+    return _hyve_sitemap_profiles("https://www.autumnfair.com")
+
+
+def _homeandgift_profiles() -> tuple[list[str], str | None]:
+    return _hyve_sitemap_profiles("https://homeandgift.co.uk")
+
+
+def _glee_profiles() -> tuple[list[str], str | None]:
+    return _hyve_sitemap_profiles("https://www.gleebirmingham.com")
 
 
 def _topdrawer_profiles() -> tuple[list[str], str | None]:
@@ -655,6 +757,9 @@ URL_ADAPTERS: list[tuple[str, callable]] = [
     ("highpointmarket.org", _highpoint_profiles),
     ("hometex.com.tr", _hometex_profiles),
     ("springfair.com", _springfair_profiles),
+    ("autumnfair.com", _autumnfair_profiles),
+    ("homeandgift.co.uk", _homeandgift_profiles),
+    ("gleebirmingham.com", _glee_profiles),
     ("topdrawer.co.uk", _topdrawer_profiles),
 ]
 
@@ -675,12 +780,16 @@ def discover_profiles(seed_url: str) -> tuple[list[str] | None, str | None]:
     return None, None
 
 
-def discover_records(seed_url: str, max_pages: int | None = None
+def discover_records(seed_url: str, max_pages: int | None = None,
+                     user_id: int | None = None
                      ) -> tuple[list[dict] | None, str | None]:
-    """Full-record adapters (Ambiente, High Point). Returns (records, error).
+    """Full-record adapters (Messe Frankfurt events, High Point).
+    Returns (records, error).
 
     max_pages is forwarded to adapters that build one record per fetched
-    page (High Point), so the job's page budget caps their record count."""
+    page (High Point), so the job's page budget caps their record count.
+    user_id lets adapters skip rows this tenant already captured (re-runs
+    must make progress, never rebuild the same first N)."""
     host = (seed_url.split("//", 1)[-1].split("/", 1)[0] or "").lower()
     if "messefrankfurt.com" in host:
         try:
@@ -689,7 +798,9 @@ def discover_records(seed_url: str, max_pages: int | None = None
             return None, f"adapter error: {str(e)[:150]}"
     if "highpointmarket.org" in host:
         try:
-            return _highpoint_records(seed_url, max_pages)
+            if user_id is None:
+                return _highpoint_records(seed_url, max_pages)
+            return _highpoint_records(seed_url, max_pages, user_id=user_id)
         except Exception as e:
             return None, f"adapter error: {str(e)[:150]}"
     return None, None
