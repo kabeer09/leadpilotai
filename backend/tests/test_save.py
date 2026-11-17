@@ -103,6 +103,73 @@ def test_profile_identity_keeps_directory_companies_separate():
             d2.close()
 
 
+def test_generic_section_label_never_names_or_matches_a_company():
+    """Hyve fairs (Spring Fair etc.) render <h1>Exhibitors</h1> above every
+    profile; the real brand follows in og:title. Regression: 665 profiles
+    once collapsed into a single junk row named after that label."""
+    from app.crawler import _save_company, _find_company, extract_page
+    uid, sid = _owner()
+    html = ("<html><head><title>Exhibitors | Spring Fair</title>"
+            "<meta property='og:title' "
+            "content='Nova of London Ltd | Spring Fair 2027'>"
+            "</head><body><h1>Exhibitors</h1><h1>Nova of London Ltd</h1>"
+            "Mail sales@nova-regression.example</body></html>")
+    data = extract_page("https://regress.example/exhibitors/nova-london", html)
+    db = SessionLocal()
+    junk_id = cid = solo_id = other_id = None
+    try:
+        # the pre-existing magnet row a naive name match would hit
+        junk = Company(user_id=uid, source_id=sid, name="Exhibitors",
+                       profile_url="https://regress.example/exhibitors/old")
+        db.add(junk)
+        db.flush()
+        junk_id = junk.id
+        c = _save_company(db, uid, sid,
+                          "https://regress.example/exhibitors/nova-london",
+                          dict(data), 1)
+        assert c is not None
+        # label skipped: og:title supplies the real brand
+        assert c.name == "Nova of London Ltd", c.name
+        assert c.id != junk_id, "profile must not be absorbed by the label row"
+        # a page whose ONLY name is the label still saves (last resort)…
+        label_only = {"site_name": "", "og_title": "", "h1": "Exhibitors",
+                      "title": "Exhibitors", "description": "d",
+                      "emails": [], "phones": [], "whatsapp": [],
+                      "links": [], "official_links": [], "text_len": 600}
+        solo = _save_company(db, uid, sid,
+                             "https://regress.example/exhibitors/label-only",
+                             dict(label_only), 1)
+        assert solo is not None and solo.name == "Exhibitors"
+        # …but the label never matches another row by name
+        assert _find_company(db, uid, "https://regress.example/exhibitors/x",
+                             "regress.example", "Exhibitors") is None
+        # shared SEO fallback titles (unpopulated profiles) must not
+        # collapse into one row either — same hazard, subtler shape
+        seo = "Discover Retail & Wholesale Exhibitors"
+        other = Company(user_id=uid, source_id=sid, name=seo,
+                        profile_url="https://regress.example/exhibitors/other")
+        db.add(other)
+        db.flush()
+        other_id = other.id
+        assert _find_company(
+            db, uid, "https://regress.example/exhibitors/yet-another",
+            "regress.example", seo) is None
+        cid = c.id
+        solo_id = solo.id
+    finally:
+        db.close()
+        d2 = SessionLocal()
+        try:
+            for rid in [x for x in (cid, junk_id, solo_id, other_id) if x]:
+                for l in d2.query(Lead).filter(Lead.company_id == rid).all():
+                    d2.delete(l)
+                d2.query(Contact).filter(Contact.company_id == rid).delete()
+                d2.query(Company).filter(Company.id == rid).delete()
+            d2.commit()
+        finally:
+            d2.close()
+
+
 def test_template_names_and_short_digit_runs_rejected():
     from app.crawler import _save_company, _norm_phone
     assert _norm_phone("20260916") is None  # date/booth artifact

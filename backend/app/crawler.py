@@ -40,6 +40,29 @@ SOCIAL_KINDS = {"facebook": "FACEBOOK", "instagram": "INSTAGRAM",
                 "tiktok": "TIKTOK"}
 JUNK_EMAIL_DOMAINS = ("example.com", "example.org", "test.com", ".png", ".jpg")
 
+# Section labels that templates put where a company name belongs (e.g. the
+# Hyve fairs render <h1>Exhibitors</h1> above every profile page). They are
+# used for naming only as a last resort and NEVER take part in dedupe
+# matching — otherwise every profile of a fair collapses into one junk row
+# (Spring Fair 2026: 665 profiles + 933 contacts absorbed into a single row).
+GENERIC_NAMES = frozenset({
+    "exhibitor", "exhibitors", "exhibition", "exhibitions",
+    "company", "companies", "supplier", "suppliers", "brand", "brands",
+    "contact", "contact us", "about", "about us", "directory",
+    "exhibitor list", "exhibitor directory", "list of exhibitors",
+})
+# Matching is broader than naming: a name that merely CONTAINS an
+# exhibitor/exhibition word (e.g. the shared SEO fallback title
+# "Discover Retail & Wholesale Exhibitors" on unpopulated profiles) must
+# never dedupe-match either — several fallback pages would otherwise
+# collapse into one row again.
+_EXHIBITOR_WORD_RE = re.compile(r"\bexhibit(?:or|ors|ion|ions)\b", re.I)
+
+
+def _is_generic_name(name: str) -> bool:
+    n = (name or "").strip().lower()
+    return not n or n in GENERIC_NAMES or bool(_EXHIBITOR_WORD_RE.search(n))
+
 _cancel_flags: dict[int, threading.Event] = {}
 _threads: dict[int, threading.Thread] = {}
 
@@ -512,15 +535,27 @@ def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
         return cleaned
 
     h1 = data.get("h1") or ""
-    name = (_clean(data.get("profile_name") or "")
-            or (_clean(h1) if len(h1) <= 80 else "")
-            or _clean(data.get("details_name") or "")
-            or _clean(data.get("title") or "")
-            or _clean(data.get("og_title") or "")
-            or data.get("site_name"))
-    # Unrendered front-end template placeholders are not company names
-    # (e.g. "{lineName} shown by {exhibitorName}").
-    if not name or "{" in name or "}" in name or "%s" in name:
+    # Name candidates in priority order. A generic section label (Hyve
+    # fairs render <h1>Exhibitors</h1> above every profile) is only used
+    # as a last resort — og:title usually carries the real brand — and
+    # generic names never take part in dedupe matching (see _find_company).
+    cands = (_clean(data.get("profile_name") or ""),
+             _clean(h1) if len(h1) <= 80 else "",
+             _clean(data.get("details_name") or ""),
+             _clean(data.get("title") or ""),
+             _clean(data.get("og_title") or ""),
+             _clean(data.get("site_name") or ""))
+
+    def _usable(c: str) -> bool:
+        # Unrendered front-end template placeholders are not company names
+        # (e.g. "{lineName} shown by {exhibitorName}").
+        return bool(c) and "{" not in c and "}" not in c and "%s" not in c
+
+    name = next((c for c in cands if _usable(c)
+                 and c.lower() not in GENERIC_NAMES), "")
+    if not name:
+        name = next((c for c in cands if _usable(c)), "")
+    if not name:
         return None
     host = urlparse(url).hostname or ""
     # Identity: exact profile URL first; homepage URLs additionally match by
@@ -652,15 +687,21 @@ CONTACT_PAGE_RE = re.compile(r"contact|about|team|support|impressum|kontakt|reac
 def _find_company(db, user_id: int, url: str, host: str, name: str = None,
                   emails: list = None, phones: list = None):
     """Find the existing row for a page (profile URL first, then name, then
-    shared contact email/phone, then homepage by domain)."""
+    shared contact email/phone, then homepage by domain).
+
+    Generic section labels ("Exhibitors") never take part in name matching:
+    every profile page of a template fair carries the same label, so matching
+    on it would absorb an entire fair into one junk row.
+    """
     existing = db.query(Company).filter(
         Company.user_id == user_id, Company.profile_url == url).first()
-    if not existing and name and len(name) >= 10:
+    generic = _is_generic_name(name)
+    if not existing and name and len(name) >= 10 and not generic:
         # Match by exact name (only for meaningful names, not generic
         # placeholders like "Exhibitor" that appear on many pages)
         existing = db.query(Company).filter(
             Company.user_id == user_id, Company.name == name).first()
-    if not existing and name and len(name) >= 10:
+    if not existing and name and len(name) >= 10 and not generic:
         # Match by name prefix (first 2 words) to catch variants like
         # "Kim Seybert" and "Kim Seybert Fall 2026 Catalog"
         words = name.split()
@@ -669,6 +710,9 @@ def _find_company(db, user_id: int, url: str, host: str, name: str = None,
             existing = db.query(Company).filter(
                 Company.user_id == user_id,
                 Company.name.like(prefix + "%")).first()
+            if existing and _is_generic_name(existing.name):
+                # never dedupe into a section-label / SEO-title row
+                existing = None
     if not existing and emails:
         # Match by shared email
         from app.models import Contact
