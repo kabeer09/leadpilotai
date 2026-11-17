@@ -41,12 +41,19 @@ client = TestClient(fastapi_app, follow_redirects=False)
 
 # The complete set of routes reachable WITHOUT a bearer token.
 # Frozen by design: changing this list is a security review, not a fix.
+# Review note (public directory launch): GET /api/directory/meta and
+# GET /api/directory/search are deliberately public — they power the
+# landing page's free-for-limited-time search and are contractually
+# contact-locked (emails/phones/websites are NEVER in guest payloads;
+# reveal lives behind GET /api/directory/company/{id} which stays 401).
 PUBLIC = {
     ("GET", "/"),
     ("GET", "/api/auth/google/callback"),
     ("GET", "/api/auth/google/client-status"),
     ("GET", "/api/auth/google/login"),
     ("GET", "/api/auth/verify"),
+    ("GET", "/api/directory/meta"),
+    ("GET", "/api/directory/search"),
     ("GET", "/api/health"),
     ("GET", "/api/import/template"),
     ("GET", "/api/sources"),
@@ -96,7 +103,7 @@ def _auth(t: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def test_every_non_public_route_rejects_unauthenticated_calls():
-    """95/95 protected routes answer 401 without a token.
+    """Every protected route answers 401 without a token.
 
     Auth runs before body/query validation, so even POSTs without a
     payload and GETs with required query params must answer 401 (never
@@ -121,7 +128,7 @@ def test_every_non_public_route_rejects_unauthenticated_calls():
 
 
 def test_public_route_allowlist_is_exact_and_frozen():
-    """Exactly the 17 reviewed routes are public — no more, no fewer.
+    """Exactly the reviewed routes are public — no more, no fewer.
 
     Probing every route unauthenticated and collecting the non-401 ones
     must reproduce PUBLIC bit-for-bit. A newly added public endpoint, or

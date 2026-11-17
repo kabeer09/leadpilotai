@@ -3,13 +3,15 @@ import { Link, useNavigate } from 'react-router-dom';
 import {
   Zap, Search, ArrowRight, Check, Mail, FileSpreadsheet, Instagram,
   MessageCircle, KeyRound, Globe, Users, BarChart3, ShieldCheck,
-  Sparkles, Building2, Menu, X,
+  Sparkles, Building2, Menu, X, Lock, MapPin, Loader2, ExternalLink,
 } from 'lucide-react';
+import { directoryMeta, directorySearch, directoryCompany } from '../lib/api';
 
 /* ------------------------------------------------------------------ data */
 
 const NAV = [
   { label: 'Home', href: '#home' },
+  { label: 'Directory', href: '#directory' },
   { label: 'Features', href: '#features' },
   { label: 'Packages', href: '#packages' },
   { label: 'About', href: '#about' },
@@ -58,24 +60,90 @@ const GALLERY = [
 
 const PLANS = [
   {
-    name: 'Starter', price: '€0', cadence: '14-day free trial',
+    name: 'Starter', price: '€0', cadence: 'directory free for a limited time',
     highlight: false,
-    features: ['1 workspace', '500 enrichment credits', 'Dry-run campaigns', 'CSV export', 'Email support'],
-    cta: 'Start free',
+    features: ['Public buyer/product directory', '40 free searches per day', 'Fair & country filters', 'Sign up to reveal contacts', 'Founding-member pricing locked at €0'],
+    cta: 'Search free now',
   },
   {
-    name: 'Growth', price: '€49', cadence: 'per month',
+    name: 'Growth', price: '€49', cadence: 'per month · founding rate',
     highlight: true,
-    features: ['Unlimited leads', 'Live Gmail sending', 'Analytics dashboard', 'WhatsApp module', 'Follow-up reminders'],
+    features: ['Unlimited lead research', 'Live Gmail sending', 'Contact reveal & export', 'Analytics dashboard', 'Follow-up reminders'],
     cta: 'Start free trial',
   },
   {
-    name: 'Scale', price: '€129', cadence: 'per month',
+    name: 'Scale', price: '€129', cadence: 'per month · founding rate',
     highlight: false,
     features: ['Everything in Growth', 'Multi-user team', 'API access', 'Priority onboarding', 'Dedicated support'],
     cta: 'Talk to sales',
   },
 ];
+
+/* --------------------------------------------------- directory tool types */
+
+type DirMeta = {
+  total: number;
+  with_email: number;
+  with_phone: number;
+  by_fair: { id: string; label: string; count: number }[];
+  fairs: { id: string; label: string }[];
+  countries: string[];
+  free_per_day: number;
+  updated_at: string | null;
+  disclaimer: string;
+  locked_note: string;
+};
+
+type DirItem = {
+  id: number;
+  name: string;
+  city: string | null;
+  country: string | null;
+  category: string | null;
+  product_summary: string;
+  products: { name: string }[];
+  fair: string | null;
+  hall: string | null;
+  booth: string | null;
+  source_url: string | null;
+  has_email: boolean;
+  has_phone: boolean;
+};
+
+type DirSearch = {
+  record_type: string;
+  disclaimer: string;
+  locked_note: string;
+  free: { per_day: number; remaining: number };
+  total: number;
+  page: number;
+  page_size: number;
+  items: DirItem[];
+};
+
+type DirReveal = {
+  company: {
+    id: number;
+    name: string;
+    website: string | null;
+    fair: string | null;
+    source_url: string | null;
+    product_summary: string;
+    hall: string | null;
+    booth: string | null;
+    country: string | null;
+    city: string | null;
+  };
+  contacts: {
+    kind: string;
+    value: string;
+    source_url: string | null;
+    verification: string;
+    is_primary: boolean;
+  }[];
+  disclaimer: string;
+  evidence_note: string;
+};
 
 /* --------------------------------------------------------------- helpers */
 
@@ -166,8 +234,14 @@ function Header() {
 }
 
 function Hero() {
-  const navigate = useNavigate();
   const [q, setQ] = useState('');
+
+  const submit = (value?: string) => {
+    const query = (value ?? q).trim();
+    // Hand the query to the directory tool below and scroll to it.
+    window.dispatchEvent(new CustomEvent('lp:search', { detail: { q: query } }));
+    document.getElementById('directory')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 
   return (
     <section id="home" className="relative overflow-hidden">
@@ -192,20 +266,20 @@ function Hero() {
         </h1>
 
         <p className="mx-auto mt-5 max-w-2xl text-lg text-gray-600">
-          Crawl trade-fair directories and company websites, build qualified lead lists,
-          and send personalized campaigns — all from one private workspace.
+          Search thousands of trade-fair exhibitors by product or company — free for a limited time —
+          then build qualified lead lists and send personalized campaigns from one private workspace.
         </p>
 
         {/* search */}
         <form
-          onSubmit={(e) => { e.preventDefault(); navigate('/signup'); }}
+          onSubmit={(e) => { e.preventDefault(); submit(); }}
           className="mx-auto mt-8 flex max-w-2xl items-center gap-2 rounded-full border border-gray-200 bg-white p-2 pl-5 shadow-[0_8px_30px_rgba(0,0,0,0.06)]"
         >
           <Search className="h-5 w-5 shrink-0 text-gray-400" />
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search 50+ trade fairs and industries…"
+            placeholder="Search products, companies or trade fairs…"
             className="w-full bg-transparent text-sm text-gray-900 placeholder-gray-400 focus:outline-none"
           />
           <button
@@ -221,7 +295,7 @@ function Hero() {
           {PILLS.map((p) => (
             <button
               key={p}
-              onClick={() => setQ(p)}
+              onClick={() => { setQ(p); submit(p); }}
               className="rounded-full border border-gray-200 bg-white/70 px-5 py-2 text-sm font-medium text-gray-700 backdrop-blur transition hover:bg-white"
             >
               {p}
@@ -246,6 +320,377 @@ function Integrations() {
         ))}
       </div>
     </div>
+  );
+}
+
+/* ---------------------------------------------------- directory tool */
+
+function DirectoryTool() {
+  const navigate = useNavigate();
+  const [meta, setMeta] = useState<DirMeta | null>(null);
+  const [q, setQ] = useState('');
+  const [fair, setFair] = useState('');
+  const [country, setCountry] = useState('');
+  const [res, setRes] = useState<DirSearch | null>(null);
+  const [limitMsg, setLimitMsg] = useState('');
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [page, setPage] = useState(1);
+  const [revealed, setRevealed] = useState<Record<number, DirReveal>>({});
+  const [revealBusy, setRevealBusy] = useState<number | null>(null);
+
+  // public totals for the hero counter / filter dropdowns
+  useEffect(() => {
+    directoryMeta()
+      .then((m: DirMeta) => setMeta(m))
+      .catch(() => setMeta(null));
+  }, []);
+
+  const run = async (opts?: { q?: string; fair?: string; country?: string; page?: number }) => {
+    const query = (opts?.q ?? q).trim();
+    const fairV = opts?.fair ?? fair;
+    const countryV = opts?.country ?? country;
+    const pageV = opts?.page ?? 1;
+    if (query.length === 1) {
+      setNotice('Keep the search to 2+ characters.');
+      return;
+    }
+    if (!query && !fairV && !countryV) {
+      setNotice('Type a product or company name, or pick a fair / country filter.');
+      return;
+    }
+    setBusy(true);
+    setNotice('');
+    setLimitMsg('');
+    try {
+      const params: Record<string, string | number> = { page: pageV };
+      if (query) params.q = query;
+      if (fairV) params.fair = fairV;
+      if (countryV) params.country = countryV;
+      const data: DirSearch = await directorySearch(params);
+      setRes(data);
+      setPage(pageV);
+    } catch (err) {
+      const e = err as { response?: { status?: number; data?: { detail?: string } } };
+      const status = e.response?.status;
+      const detail = typeof e.response?.data?.detail === 'string' ? e.response.data.detail : '';
+      if (status === 429) {
+        setLimitMsg(detail || 'Free daily search limit reached — create a free account to keep searching.');
+        setRes(null);
+      } else if (status === 422) {
+        setNotice(detail || 'That search was not accepted.');
+      } else {
+        setNotice('Something went wrong — please try again.');
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // hero search + pill clicks arrive as a CustomEvent
+  useEffect(() => {
+    const onSearch = (e: Event) => {
+      const detail = (e as CustomEvent<{ q?: string }>).detail || {};
+      const query = (detail.q || '').trim();
+      setQ(query);
+      void run({ q: query, page: 1 });
+    };
+    window.addEventListener('lp:search', onSearch);
+    return () => window.removeEventListener('lp:search', onSearch);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, fair, country]);
+
+  // contact reveal — the conversion gate: 401 sends the guest to signup
+  const reveal = async (id: number) => {
+    setRevealBusy(id);
+    try {
+      const data: DirReveal = await directoryCompany(id);
+      setRevealed((r) => ({ ...r, [id]: data }));
+    } catch (err) {
+      const e = err as { response?: { status?: number; data?: { detail?: string } } };
+      if (e.response?.status === 401) {
+        navigate('/signup');
+      } else {
+        setNotice(
+          typeof e.response?.data?.detail === 'string'
+            ? e.response.data.detail
+            : 'Could not reveal this company — please try again.'
+        );
+      }
+    } finally {
+      setRevealBusy(null);
+    }
+  };
+
+  const total = meta ? meta.total.toLocaleString() : '—';
+  const pages = res ? Math.max(1, Math.ceil(res.total / res.page_size)) : 1;
+
+  return (
+    <section id="directory" className="mx-auto max-w-6xl scroll-mt-20 px-4 py-16">
+      <div className="mx-auto max-w-3xl text-center">
+        <div className="inline-flex items-center gap-2 rounded-full border border-lime-200 bg-lime-50 px-3 py-1 text-xs font-semibold text-lime-800">
+          <Sparkles className="h-3.5 w-3.5" />
+          Free for a limited time
+        </div>
+        <h2 className="mt-4 text-3xl font-bold tracking-tight text-gray-900 md:text-4xl">
+          Search the global exhibitor directory
+        </h2>
+        <p className="mt-3 text-lg text-gray-600">
+          {meta
+            ? `${total} exhibitor profiles from crawled trade fairs — by product, company, fair or country.`
+            : 'Exhibitor profiles from crawled trade fairs — by product, company, fair or country.'}
+        </p>
+      </div>
+
+      {/* search controls */}
+      <div className="mx-auto mt-8 max-w-4xl rounded-2xl border border-gray-200 bg-white p-4 shadow-[0_8px_30px_rgba(0,0,0,0.05)]">
+        <form
+          onSubmit={(e) => { e.preventDefault(); void run({ page: 1 }); }}
+          className="flex flex-col gap-3 md:flex-row"
+        >
+          <div className="flex flex-1 items-center gap-2 rounded-full border border-gray-200 bg-gray-50 px-4 py-2.5">
+            <Search className="h-4 w-4 shrink-0 text-gray-400" />
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="e.g. ceramic tiles, lighting, packaging…"
+              className="w-full bg-transparent text-sm text-gray-900 placeholder-gray-400 focus:outline-none"
+            />
+          </div>
+          <select
+            value={fair}
+            onChange={(e) => setFair(e.target.value)}
+            className="rounded-full border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-700 focus:outline-none"
+          >
+            <option value="">All trade fairs</option>
+            {(meta?.fairs || []).map((f) => (
+              <option key={f.id} value={f.id}>{f.label}</option>
+            ))}
+          </select>
+          <select
+            value={country}
+            onChange={(e) => setCountry(e.target.value)}
+            className="rounded-full border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-700 focus:outline-none"
+          >
+            <option value="">All countries</option>
+            {(meta?.countries || []).map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+          <button
+            type="submit"
+            disabled={busy}
+            className="flex items-center justify-center gap-2 rounded-full bg-gray-900 px-6 py-2.5 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-60"
+          >
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+            Search
+          </button>
+        </form>
+
+        {/* free-limit banner */}
+        {limitMsg ? (
+          <div className="mt-4 flex flex-col items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 sm:flex-row sm:items-center">
+            <span className="flex-1">{limitMsg}</span>
+            <Link
+              to="/signup"
+              className="shrink-0 rounded-full bg-amber-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-amber-800"
+            >
+              Create free account
+            </Link>
+          </div>
+        ) : null}
+
+        {notice ? (
+          <p className="mt-3 text-sm text-gray-500">{notice}</p>
+        ) : null}
+
+        {res ? (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 pt-4 text-xs text-gray-500">
+            <span>
+              <b className="text-gray-900">{res.total.toLocaleString()}</b> results
+              {res.free ? (
+                <> · <b className="text-gray-900">{res.free.remaining}</b> of {res.free.per_day} free searches left today</>
+              ) : null}
+            </span>
+            <span>{meta?.updated_at ? `Directory updated ${new Date(meta.updated_at).toLocaleDateString()}` : null}</span>
+          </div>
+        ) : null}
+      </div>
+
+      {/* results */}
+      {res && res.items.length === 0 ? (
+        <p className="mx-auto mt-10 max-w-xl text-center text-sm text-gray-500">
+          No exhibitors matched that search. Try a broader product word, or clear the fair/country filters.
+        </p>
+      ) : null}
+
+      <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
+        {(res?.items || []).map((it) => {
+          const rv = revealed[it.id];
+          return (
+            <div
+              key={it.id}
+              className="flex flex-col rounded-2xl border border-gray-200 bg-white p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-base font-bold text-gray-900">{it.name}</h3>
+                  <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
+                    {it.fair ? (
+                      <span className="inline-flex items-center gap-1">
+                        <Building2 className="h-3.5 w-3.5" />
+                        {it.fair}
+                      </span>
+                    ) : null}
+                    {it.city || it.country ? (
+                      <span className="inline-flex items-center gap-1">
+                        <MapPin className="h-3.5 w-3.5" />
+                        {[it.city, it.country].filter(Boolean).join(', ')}
+                      </span>
+                    ) : null}
+                    {it.hall || it.booth ? (
+                      <span>Hall {it.hall || '—'} · Booth {it.booth || '—'}</span>
+                    ) : null}
+                  </p>
+                </div>
+                <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                  {it.category || 'Exhibitor'}
+                </span>
+              </div>
+
+              {it.product_summary ? (
+                <p className="mt-3 line-clamp-2 text-sm text-gray-600">{it.product_summary}</p>
+              ) : null}
+
+              {it.products.length > 0 ? (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {it.products.map((p) => (
+                    <span key={p.name} className="rounded-full bg-primary-50 px-2 py-0.5 text-[11px] font-medium text-primary-700">
+                      {p.name}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+
+              {/* locked / revealed contacts */}
+              <div className="mt-4 border-t border-gray-100 pt-3">
+                {rv ? (
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-medium uppercase tracking-wide text-gray-400">
+                      Contact details · sourced
+                    </p>
+                    {rv.company.website ? (
+                      <a
+                        href={rv.company.website}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="flex items-center gap-1.5 text-sm font-medium text-primary-700 hover:underline"
+                      >
+                        <Globe className="h-3.5 w-3.5" />
+                        {rv.company.website.replace(/^https?:\/\//, '')}
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    ) : null}
+                    {rv.contacts.map((c) => (
+                      <div key={c.kind + c.value} className="flex items-center justify-between gap-2 text-sm">
+                        <span className="flex items-center gap-1.5 text-gray-800">
+                          {c.kind === 'EMAIL' ? <Mail className="h-3.5 w-3.5 text-gray-400" /> : <MessageCircle className="h-3.5 w-3.5 text-gray-400" />}
+                          {c.value}
+                        </span>
+                        {c.source_url ? (
+                          <a
+                            href={c.source_url}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            className="shrink-0 text-[11px] text-gray-400 hover:text-gray-600"
+                          >
+                            source
+                          </a>
+                        ) : null}
+                      </div>
+                    ))}
+                    {rv.contacts.length === 0 && !rv.company.website ? (
+                      <p className="text-sm text-gray-500">No contact details published on the source page.</p>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="flex flex-wrap items-center gap-3 text-xs text-gray-500">
+                      <span className={`inline-flex items-center gap-1 ${it.has_email ? 'text-gray-700' : ''}`}>
+                        <Mail className="h-3.5 w-3.5" />
+                        {it.has_email ? 'Email on file' : 'No email'}
+                      </span>
+                      <span className={`inline-flex items-center gap-1 ${it.has_phone ? 'text-gray-700' : ''}`}>
+                        <MessageCircle className="h-3.5 w-3.5" />
+                        {it.has_phone ? 'Phone on file' : 'No phone'}
+                      </span>
+                      <span className="inline-flex items-center gap-1 text-gray-400">
+                        <Lock className="h-3.5 w-3.5" />
+                        Locked
+                      </span>
+                    </span>
+                    <button
+                      onClick={() => void reveal(it.id)}
+                      disabled={revealBusy === it.id}
+                      className="shrink-0 rounded-full bg-gray-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-gray-800 disabled:opacity-60"
+                    >
+                      {revealBusy === it.id ? 'Revealing…' : 'Reveal contact'}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* source attribution */}
+              {it.source_url ? (
+                <a
+                  href={it.source_url}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="mt-3 inline-flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  Fair directory listing
+                </a>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* pagination */}
+      {res && pages > 1 ? (
+        <div className="mt-6 flex items-center justify-center gap-4">
+          <button
+            onClick={() => void run({ page: page - 1 })}
+            disabled={page <= 1 || busy}
+            className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+          >
+            ← Previous
+          </button>
+          <span className="text-sm text-gray-500">Page {page} of {pages}</span>
+          <button
+            onClick={() => void run({ page: page + 1 })}
+            disabled={page >= pages || busy}
+            className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+          >
+            Next →
+          </button>
+        </div>
+      ) : null}
+
+      {/* honest-data footnotes */}
+      <div className="mx-auto mt-10 max-w-3xl space-y-2 text-center text-xs leading-relaxed text-gray-400">
+        <p>{res?.disclaimer || meta?.disclaimer}</p>
+        <p>
+          Directory search is free for a limited time ({meta?.free_per_day ?? '—'} searches per day per visitor).
+          Websites and contact details are locked until you create a free account — we never guess or fabricate them.
+        </p>
+        <p>
+          A listing means the company appeared in that fair&apos;s exhibitor directory — it is not a verified buyer
+          or a guarantee of current trading activity. Verify before outreach.
+        </p>
+      </div>
+    </section>
   );
 }
 
@@ -370,7 +815,8 @@ function Packages() {
         ))}
       </div>
       <p className="mt-6 text-center text-xs text-gray-400">
-        *Sample pricing — edit the PLANS array in <code>src/pages/Landing.tsx</code> to match your real plans.
+        Launch offer: directory search is free for a limited time. Founding members who sign up now keep
+        €0 Starter pricing when paid tiers go live. Prices exclude VAT where applicable.
       </p>
     </section>
   );
@@ -462,6 +908,7 @@ function Footer() {
           <span className="ml-2 rounded-md bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">trial</span>
         </div>
         <nav className="flex flex-wrap items-center justify-center gap-6 text-sm text-gray-500">
+          <a href="#directory" className="hover:text-gray-900">Directory</a>
           <a href="#features" className="hover:text-gray-900">Features</a>
           <a href="#packages" className="hover:text-gray-900">Packages</a>
           <a href="#about" className="hover:text-gray-900">About</a>
@@ -469,6 +916,11 @@ function Footer() {
         </nav>
         <p className="text-xs text-gray-400">© {new Date().getFullYear()} LeadPilot. All rights reserved.</p>
       </div>
+      <p className="mx-auto max-w-4xl px-4 pb-6 text-center text-[11px] leading-relaxed text-gray-400">
+        Exhibitor data is crawled from public trade-fair directories and attributed to its source.
+        A listing indicates presence at that fair — not current buying/selling activity and not verified
+        contactability. Directory search is free for a limited time; contact reveal requires a free account.
+      </p>
     </footer>
   );
 }
@@ -481,6 +933,7 @@ export default function Landing() {
       <Header />
       <main>
         <Hero />
+        <DirectoryTool />
         <Integrations />
         <Features />
         <Gallery />

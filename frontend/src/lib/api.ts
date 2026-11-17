@@ -147,6 +147,15 @@ export const exhibitorsExport = (p: Record<string, string | number | boolean>) =
 export const exhibitorsExtract = (d: object) =>
   api.post('/exhibitors/extract', d).then((r) => r.data);
 
+// Public directory (landing page free-for-limited-time search).
+// Guest search never returns emails/phones/websites — reveal requires
+// sign-in (401 → the conversion gate) and returns per-row evidence.
+export const directoryMeta = () => api.get('/directory/meta').then((r) => r.data);
+export const directorySearch = (p: Record<string, string | number>) =>
+  api.get('/directory/search', { params: p }).then((r) => r.data);
+export const directoryCompany = (id: number) =>
+  api.get(`/directory/company/${id}`).then((r) => r.data);
+
 // Verification
 export const verifyEmail = (d: object) => api.post('/verify/email', d).then((r) => r.data);
 export const verifyBatch = (d: object) => api.post('/verify/batch', d).then((r) => r.data);
