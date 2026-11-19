@@ -253,3 +253,70 @@ def test_ingest_recovers_lock_error_per_record(monkeypatch):
         except Exception:
             db.rollback()
         db.close()
+
+
+def test_ingest_skips_record_when_lock_outlasts_retries(monkeypatch):
+    """Job 30 pattern: lock contention persisting through ALL retry
+    attempts must skip that ONE record with an honest error — never fail
+    the whole job (job 30 died at an [S3] event commit inside
+    _enrich_from_official_site while a parallel job held the lock)."""
+    import app.crawler as craw
+    uid, sid = _owner()
+    db = SessionLocal()
+    try:
+        job = CrawlJob(user_id=uid, source_id=sid,
+                       url="https://lockskip.example/", max_pages=100,
+                       max_depth=0, status="CRAWLING")
+        db.add(job)
+        db.commit()
+        jid = job.id
+    finally:
+        db.close()
+
+    recs = [{
+        "title": f"Skip Co {i}", "profile_name": f"Skip Co {i}",
+        "description": "Widgets.", "emails": [], "phones": [],
+        "official_website": f"https://site{i}.lockskip.example",
+        "profile_url": f"https://lockskip.example/exhibitor/{i}",
+        "official_links": [], "links": [], "text_len": 5000,
+    } for i in (1, 2)]
+
+    calls = {"n": 0}
+
+    def locked_for_site1(db_, uid_, comp, site, client, render_budget,
+                         job_id=None):
+        calls["n"] += 1
+        if "site1" in site:
+            raise Exception("(sqlite3.OperationalError) database is locked")
+        return 0, 0
+
+    monkeypatch.setattr(craw, "_enrich_from_official_site",
+                        locked_for_site1)
+    shared = {"lock": threading.Lock(), "cancel": threading.Event(),
+              "pages": 0, "companies": 0, "contacts": 0,
+              "render_budget": [10], "errors": []}
+    db = SessionLocal()
+    try:
+        job = db.query(CrawlJob).filter(CrawlJob.id == jid).first()
+        # Must NOT raise despite record 1 hitting the lock 3 times.
+        n = craw._ingest_adapter_records(db, job, recs, shared)
+        assert n == 1, "record 2 saved; record 1 skipped after retries"
+        assert calls["n"] == 4, "record 1: 3 attempts, record 2: once"
+        assert len(shared["errors"]) == 1
+        assert recs[0]["profile_url"] in shared["errors"][0]
+        # record 1's row was committed BEFORE enrichment — it is KEPT.
+        rows = db.query(Company).filter(
+            Company.profile_url.in_([r["profile_url"] for r in recs])).all()
+        assert len(rows) == 2, "skipped record's saved row must be kept"
+    finally:
+        try:
+            db.query(Company).filter(
+                Company.profile_url.in_(
+                    [r["profile_url"] for r in recs])).delete(
+                        synchronize_session=False)
+            db.query(CrawlEvent).filter(CrawlEvent.job_id == jid).delete()
+            db.query(CrawlJob).filter(CrawlJob.id == jid).delete()
+            db.commit()
+        except Exception:
+            db.rollback()
+        db.close()

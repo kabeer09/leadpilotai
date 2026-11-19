@@ -1460,12 +1460,27 @@ def _ingest_adapter_records(db, job, records: list[dict],
                             enriched += 1
                     break
                 except Exception as e:
-                    if not _is_lock_error(e) or _attempt == 2:
-                        raise
+                    if not _is_lock_error(e):
+                        raise  # real bug — always loud
                     try:
                         db.rollback()
                     except Exception:
                         pass
+                    if _attempt == 2:
+                        # Lock contention outlasted the retries: skip THIS
+                        # record and keep going. The row (if the save landed)
+                        # is kept; an honest error is recorded. Losing one
+                        # record to contention must never fail the whole job
+                        # (job 30 died exactly here while another job held
+                        # the write lock across its own enrichment HTTP).
+                        with lock:
+                            shared.setdefault("errors", []).append(
+                                f"skipped {url}: lock contention "
+                                f"after {_attempt + 1} attempts "
+                                f"(record kept if saved; resume later)")
+                        logger.warning(
+                            f"Ingest skipped {url} after lock retries")
+                        break
                     time.sleep(0.5 * (_attempt + 1))
     job.companies_found = shared["companies"]
     job.contacts_found = shared["contacts"]
