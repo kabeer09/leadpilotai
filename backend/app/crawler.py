@@ -92,6 +92,51 @@ def db_commit_retry(db, tries: int = 5) -> None:
             delay = min(delay * 2, 8.0)
 
 
+def _is_lock_error(exc: BaseException) -> bool:
+    """True for SQLite lock contention — including the poisoned-session
+    PendingRollbackError that follows a FAILED FLUSH: its message chains
+    the original 'database is locked', so a poisoned session is
+    distinguishable from a real programming error and IS recoverable
+    (Session.rollback() + re-stage)."""
+    msg = str(exc).lower()
+    return "locked" in msg or "rollback" in msg or "snapshot" in msg
+
+
+def db_write_retry(db, stage_fn, tries: int = 5) -> None:
+    """Commit a job-level write, recovering a session poisoned mid-flush.
+
+    Why this exists (jobs 27/29, proven from the logs): a flush that
+    exceeds busy_timeout — or a stale WAL read snapshot (another session
+    committed since our first read; busy_timeout does NOT apply to
+    snapshot upgrades) — makes SQLAlchemy roll the transaction back.
+    Every later operation then raises PendingRollbackError, which
+    db_commit_retry can only re-raise, killing the whole job.
+
+    Recovery: stage_fn runs on EVERY attempt — first time it IS the real
+    stage, later times it re-stages after Session.rollback() (which
+    EXPUNGES pending objects — a bare re-commit would not work).
+    stage_fn must therefore be idempotent: db_commit_retry always rolls
+    back before it raises, so re-staging never duplicates a row.
+    """
+    import time as _t
+    delay = 0.5
+    for attempt in range(tries):
+        try:
+            if attempt:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            stage_fn()
+            db_commit_retry(db, tries=2)
+            return
+        except Exception as e:
+            if not _is_lock_error(e) or attempt == tries - 1:
+                raise
+            _t.sleep(delay)
+            delay = min(delay * 2, 8.0)
+
+
 def job_progress(db, job, shared: dict, force: bool = False) -> None:
     """Write live counters, throttled: the job row is the hottest lock in
     the system (every worker touches it), so refresh at most every 15s."""
@@ -1345,45 +1390,69 @@ def _ingest_adapter_records(db, job, records: list[dict],
             }
             url = rec.get("profile_url") or job.url
             site = rec.get("official_website")
-            with lock:
-                comp = _save_company(db, job.user_id, job.source_id,
-                                     url, data, 1, lock=None)
-            if not comp:
-                continue
-            if not site and comp.website:
-                # _save_company falls back to the PAGE host — on a directory
-                # profile that is the fair's own domain, not the exhibitor's
-                # site. Never present the directory as a company's website.
-                # (Stored bare-host values carry no scheme, so compare
-                # registrable domains via domain_of on both sides.)
-                from app.validation import domain_of
-                pw = domain_of(url)
-                if pw and domain_of(comp.website) == pw:
-                    comp.website = None
+            # One record = one recoverable unit. This session reads and does
+            # HTTP between writes; when another session commits in that
+            # window the next flush fails (write-lock contention, or a stale
+            # WAL read snapshot — busy_timeout does not apply to snapshot
+            # upgrades) and POISONS the session: every later operation then
+            # raises PendingRollbackError and the whole job dies (job 27
+            # proved this from the logs). Roll back and re-stage THIS record
+            # instead: _save_company is idempotent, counters below are only
+            # incremented after success, and the commit at the end of each
+            # record bounds rollback loss to one record while releasing the
+            # write lock so parallel workers stop starving.
+            for _attempt in range(3):
+                try:
+                    with lock:
+                        comp = _save_company(db, job.user_id, job.source_id,
+                                             url, data, 1, lock=None)
+                    if not comp:
+                        break
+                    if not site and comp.website:
+                        # _save_company falls back to the PAGE host — on a directory
+                        # profile that is the fair's own domain, not the exhibitor's
+                        # site. Never present the directory as a company's website.
+                        # (Stored bare-host values carry no scheme, so compare
+                        # registrable domains via domain_of on both sides.)
+                        from app.validation import domain_of
+                        pw = domain_of(url)
+                        if pw and domain_of(comp.website) == pw:
+                            comp.website = None
+                    extra, pages_added = 0, 0
+                    # Stage 3: directories rarely publish the email, so a row still
+                    # missing one enriches from its own site — a phone alone doesn't
+                    # block it. Rows that already carry an email skip it (cheap
+                    # re-crawls). Budget: max_pages bounds RECORDS here, while each
+                    # record may cost up to ~5 visits (home + up to 3 contact pages +
+                    # accounting) — so enrichment gets headroom (×6) instead of
+                    # competing with the record cap.
+                    if site and not data["emails"] \
+                            and shared["pages"] < job.max_pages * 6 \
+                            and not db.query(Contact).filter(
+                                Contact.company_id == comp.id,
+                                Contact.kind == "EMAIL").first():
+                        extra, e_pages = _enrich_from_official_site(
+                            db, job.user_id, comp, site, client,
+                            render_budget=shared["render_budget"], job_id=job.id)
+                        pages_added = e_pages + 1
                     db_commit_retry(db)
-            saved += 1
-            with lock:
-                shared["companies"] += 1
-                shared["contacts"] += len(data["emails"]) + len(data["phones"])
-            # Stage 3: directories rarely publish the email, so a row still
-            # missing one enriches from its own site — a phone alone doesn't
-            # block it. Rows that already carry an email skip it (cheap
-            # re-crawls). Budget: max_pages bounds RECORDS here, while each
-            # record may cost up to ~5 visits (home + up to 3 contact pages +
-            # accounting) — so enrichment gets headroom (×6) instead of
-            # competing with the record cap.
-            if site and not data["emails"] \
-                    and shared["pages"] < job.max_pages * 6 \
-                    and not db.query(Contact).filter(
-                        Contact.company_id == comp.id,
-                        Contact.kind == "EMAIL").first():
-                extra, e_pages = _enrich_from_official_site(
-                    db, job.user_id, comp, site, client,
-                    render_budget=shared["render_budget"], job_id=job.id)
-                with lock:
-                    shared["pages"] += e_pages + 1
-                    shared["contacts"] += extra
-                    enriched += 1 if extra else 0
+                    saved += 1
+                    with lock:
+                        shared["companies"] += 1
+                        shared["contacts"] += (len(data["emails"])
+                                               + len(data["phones"]) + extra)
+                        shared["pages"] += pages_added
+                        if extra:
+                            enriched += 1
+                    break
+                except Exception as e:
+                    if not _is_lock_error(e) or _attempt == 2:
+                        raise
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    time.sleep(0.5 * (_attempt + 1))
     job.companies_found = shared["companies"]
     job.contacts_found = shared["contacts"]
     job.pages_visited = shared["pages"]
@@ -1437,9 +1506,18 @@ def run_job(job_id: int, force_recrawl: bool = False) -> None:
             return
         user_id, source_id = job.user_id, job.source_id
         max_pages, max_depth, seed_url = job.max_pages, job.max_depth, job.url
-        job.status = "CRAWLING"
-        job.started_at = datetime.utcnow()
-        db_commit_retry(db)
+        # Re-staged after rollback if this commit hits lock contention:
+        # rollback expires the in-memory status, so a bare re-commit would
+        # silently leave the job PENDING.
+        _started_at = datetime.utcnow()
+
+        def _stage_crawling():
+            j = db.query(CrawlJob).filter(CrawlJob.id == job_id).first()
+            if j:
+                j.status = "CRAWLING"
+                j.started_at = _started_at
+
+        db_write_retry(db, _stage_crawling)
         cancel = _cancel_flags.setdefault(job_id, threading.Event())
 
         base_host = urlparse(seed_url).hostname or ""
@@ -1470,11 +1548,14 @@ def run_job(job_id: int, force_recrawl: bool = False) -> None:
                 shared["directory_mode"] = True
             n_ingested = _ingest_adapter_records(
                 db, job, records, shared)
-            db.add(CrawlEvent(
-                user_id=user_id, job_id=job_id, url=seed_url, status="ok",
-                detail=f"[S1] adapter: {len(records)} records ingested, "
-                       f"{n_ingested} companies saved"))
-            db_commit_retry(db)
+            _ev1 = (f"[S1] adapter: {len(records)} records ingested, "
+                    f"{n_ingested} companies saved")
+
+            def _stage_ev1():
+                db.add(CrawlEvent(user_id=user_id, job_id=job_id,
+                                  url=seed_url, status="ok", detail=_ev1))
+
+            db_write_retry(db, _stage_ev1)
         profiles, adapter_err = (discover_profiles(seed_url)
                                  if not records else (None, None))
         if profiles:
@@ -1491,18 +1572,28 @@ def run_job(job_id: int, force_recrawl: bool = False) -> None:
                     if href not in shared["seen"]:
                         shared["seen"].add(href)
                         shared["queue"].put((href, 1))
-            db.add(CrawlEvent(user_id=user_id, job_id=job_id, url=seed_url,
-                              status="ok",
-                              detail=f"[S1] adapter: {len(profiles)} profiles "
-                                     f"found, {len(queued)} queued "
-                                     f"({n_done} already complete)"))
-            db_commit_retry(db)
+            _ev2 = (f"[S1] adapter: {len(profiles)} profiles "
+                    f"found, {len(queued)} queued "
+                    f"({n_done} already complete)")
+
+            def _stage_ev2():
+                db.add(CrawlEvent(user_id=user_id, job_id=job_id,
+                                  url=seed_url, status="ok", detail=_ev2))
+
+            # Job 29 died exactly here: _pending_profiles opened a read
+            # snapshot, job 28's workers committed in between, and this
+            # flush hit SQLITE_BUSY_SNAPSHOT — recovery re-stages the event.
+            db_write_retry(db, _stage_ev2)
         else:
             if adapter_err:
-                db.add(CrawlEvent(user_id=user_id, job_id=job_id, url=seed_url,
-                                  status="ok",
-                                  detail=f"[S1] generic crawl ({adapter_err[:100]})"))
-                db_commit_retry(db)
+                _ev3 = f"[S1] generic crawl ({adapter_err[:100]})"
+
+                def _stage_ev3():
+                    db.add(CrawlEvent(user_id=user_id, job_id=job_id,
+                                      url=seed_url, status="ok",
+                                      detail=_ev3))
+
+                db_write_retry(db, _stage_ev3)
             if not records:
                 # Records adapters already ingested every exhibitor — crawling
                 # the seed would only revisit the organizer's homepage, and in
@@ -1556,7 +1647,6 @@ def run_job(job_id: int, force_recrawl: bool = False) -> None:
         for t in threads:
             t.join(timeout=45)
 
-        job = db.query(CrawlJob).filter(CrawlJob.id == job_id).first()
         with shared["lock"]:
             pages, companies = shared["pages"], shared["companies"]
             errs = list(shared["errors"])
@@ -1571,36 +1661,63 @@ def run_job(job_id: int, force_recrawl: bool = False) -> None:
             final = "STALLED"
             errs.append(f"stopped with {unfinished} pages unprocessed; "
                         f"start a new crawl to resume (completed rows are kept)")
-        job.status = final
-        job.pages_visited = pages
-        job.companies_found = companies
-        job.contacts_found = shared["contacts"]
-        job.finished_at = datetime.utcnow()
+        errs_str = "\n".join(errs[-10:]) or None
         # If zero pages processed because everything was already complete,
         # add a clear explanation so the user understands (not a bug).
+        # (Built into errs_str BEFORE the write: this used to be assigned
+        # to job.errors and then unconditionally overwritten by the join.)
         if pages == 0 and not cancel.is_set():
-            # Count from in-memory shared dict (worker threads use own sessions)
             skipped_complete = shared.get("skipped_complete", 0)
             if skipped_complete > 0:
-                job.errors = ("All %d profiles were already crawled and complete. "
-                              "No new pages needed. Crawl a different directory "
-                              "or increase page budget for new companies."
-                              % skipped_complete)
-        job.errors = "\n".join(errs[-10:]) or None
-        if job.source_id:
-            src = db.query(Source).filter(Source.id == job.source_id).first()
-            if src:
-                src.status = job.status
-        db_commit_retry(db)
-        logger.info(f"Crawl job {job_id}: {job.status} pages={pages} companies={companies}")
+                skip_msg = ("All %d profiles were already crawled and complete. "
+                            "No new pages needed. Crawl a different directory "
+                            "or increase page budget for new companies."
+                            % skipped_complete)
+                errs_str = (f"{errs_str}\n{skip_msg}" if errs_str
+                            else skip_msg)
+        _finished_at = datetime.utcnow()
+        _contacts = shared["contacts"]
+
+        # No pre-query of the job row here: on a poisoned session it would
+        # raise PendingRollbackError and throw away a finished crawl.
+        # db_write_retry rolls back + re-stages instead, so the terminal
+        # status always lands.
+        def _stage_final():
+            j = db.query(CrawlJob).filter(CrawlJob.id == job_id).first()
+            if j:
+                j.status = final
+                j.pages_visited = pages
+                j.companies_found = companies
+                j.contacts_found = _contacts
+                j.finished_at = _finished_at
+                j.errors = errs_str
+            if source_id:
+                s = db.query(Source).filter(Source.id == source_id).first()
+                if s:
+                    s.status = final
+
+        db_write_retry(db, _stage_final)
+        logger.info(f"Crawl job {job_id}: {final} pages={pages} companies={companies}")
     except Exception as e:
         try:
-            job = db.query(CrawlJob).filter(CrawlJob.id == job_id).first()
-            if job:
-                job.status = "FAILED"
-                job.finished_at = datetime.utcnow()
-                job.errors = str(e)[:2000]
-                db_commit_retry(db)
+            # A poisoned session (failed flush) makes EVERY query raise
+            # PendingRollbackError — roll back FIRST so the FAILED status
+            # can still be written instead of being swallowed here.
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            _fail_err = str(e)[:2000]
+            _fail_at = datetime.utcnow()
+
+            def _stage_failed():
+                j = db.query(CrawlJob).filter(CrawlJob.id == job_id).first()
+                if j:
+                    j.status = "FAILED"
+                    j.finished_at = _fail_at
+                    j.errors = _fail_err
+
+            db_write_retry(db, _stage_failed)
         except Exception:
             pass
         logger.error(f"Crawl job {job_id} failed: {e}")
