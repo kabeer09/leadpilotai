@@ -1229,6 +1229,13 @@ def _process_url(db, client, job, canon: str, depth: int,
             with lock:
                 shared["companies"] += 1
                 shared["contacts"] += len(data["emails"]) + len(data["phones"])
+            # Persist the save BEFORE enrichment HTTP: otherwise this
+            # transaction holds SQLite's write lock across robots.txt +
+            # page fetches (up to busy_timeout each) and the OTHER
+            # worker's save dies with "database is locked" — observed
+            # every ~40s while two jobs crawled. Short transactions:
+            # nobody starves, lost takes vanish.
+            db_commit_retry(db)
             # Exhibitor profile without contacts? Try its official site.
             if (not data["emails"] and not data["phones"]
                     and data.get("official_links")):
@@ -1419,6 +1426,13 @@ def _ingest_adapter_records(db, job, records: list[dict],
                         if pw and domain_of(comp.website) == pw:
                             comp.website = None
                     extra, pages_added = 0, 0
+                    # Persist the save BEFORE enrichment HTTP: the flush
+                    # acquires SQLite's write lock, and enrichment does
+                    # robots.txt + page fetches (up to busy_timeout each)
+                    # — holding the lock across them starves every other
+                    # writer ("database is locked" every ~40s while two
+                    # jobs crawled). Short transactions, nobody starves.
+                    db_commit_retry(db)
                     # Stage 3: directories rarely publish the email, so a row still
                     # missing one enriches from its own site — a phone alone doesn't
                     # block it. Rows that already carry an email skip it (cheap
