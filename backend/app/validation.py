@@ -82,7 +82,14 @@ def domain_of(value: str | None) -> str:
     host = v.split("@")[-1] if "@" in v and "://" not in v else v
     if "://" in host:
         from urllib.parse import urlparse
-        host = urlparse(host).hostname or host
+        try:
+            host = urlparse(host).hostname or host
+        except ValueError:
+            # Malformed URL ("http://foo[bar.com" → Invalid IPv6 URL).
+            # domain_of is called on third-party values deep inside crawl
+            # jobs — return the raw string (never matches a real domain)
+            # instead of raising and killing the job.
+            pass
     host = host.lstrip(".")
     if host.startswith("www."):
         host = host[4:]

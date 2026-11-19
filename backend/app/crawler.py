@@ -340,7 +340,12 @@ def _fetch(client: httpx.Client, url: str) -> tuple[str | None, str | None]:
             loc = resp.headers.get("location")
             if not loc:
                 return None, "empty redirect"
-            current = urljoin(current, loc)
+            try:
+                current = urljoin(current, loc)
+            except ValueError:
+                # Garbage Location header ("http://[bad" → Invalid IPv6
+                # URL): a broken redirect is a fetch error, not a crash.
+                return None, "bad redirect location"
             continue
         if resp.status_code != 200:
             return None, f"HTTP {resp.status_code}"
@@ -404,15 +409,26 @@ def extract_page(url: str, html: str) -> dict:
 
     links = []
     external: list[tuple[str, str, str]] = []  # (host, url, anchor)
+    try:
+        page_host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        page_host = ""  # malformed page URL — host comparisons just miss
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         if href.startswith(("mailto:", "tel:", "javascript:", "#")):
             continue
-        full = urljoin(url, href)
+        try:
+            # Third-party HTML carries garbage hrefs ("http://[bad" →
+            # ValueError: Invalid IPv6 URL). One malformed anchor on one
+            # exhibitor page must never kill the whole crawl job — drop
+            # the junk link and keep extracting the page's real facts.
+            full = urljoin(url, href)
+            h = (urlparse(full).hostname or "").lower()
+        except ValueError:
+            continue
         anchor = (a.get_text(strip=True) or "")[:120]
         links.append((full, anchor))
-        h = (urlparse(full).hostname or "").lower()
-        if h and h != (urlparse(url).hostname or "").lower():
+        if h and h != page_host:
             external.append((h, full, anchor))
     # Hometex: extract website from "Web" text field (not a link)
     web_field = ""
@@ -431,9 +447,12 @@ def extract_page(url: str, html: str) -> dict:
     if web_field and "http" not in web_field.lower() and "." in web_field:
         if not web_field.startswith("http"):
             web_field = "https://" + web_field.rstrip("/")
-        links.append((web_field, "website"))
-        h = (urlparse(web_field).hostname or "").lower()
+        try:
+            h = (urlparse(web_field).hostname or "").lower()
+        except ValueError:
+            h = ""  # garbage "Web" field text — never fail the page
         if h:
+            links.append((web_field, "website"))
             external.append((h, web_field, "website"))
     social = ("facebook.", "linkedin.", "twitter.", "instagram.", "youtube.",
               "pinterest.", "tiktok.", "whatsapp.", "telegram.", "xing.",
@@ -602,7 +621,12 @@ def _save_company_inner(db, user_id: int, source_id: int | None, url: str,
         name = next((c for c in cands if _usable(c)), "")
     if not name:
         return None
-    host = urlparse(url).hostname or ""
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        # Malformed profile URL from third-party JSON: keep the row keyed
+        # by URL equality + name (host is only a matching hint).
+        host = ""
     # Identity: exact profile URL first; homepage URLs additionally match by
     # domain (so re-crawls of a homepage update one row — profiles on a
     # shared directory domain never collapse into each other).
@@ -784,13 +808,19 @@ def _find_company(db, user_id: int, url: str, host: str, name: str = None,
                 if existing:
                     break
     if not existing:
-        path = urlparse(url).path or "/"
+        try:
+            parts = urlparse(url)
+        except ValueError:
+            # Malformed URL from third-party JSON: no path/fragment to
+            # inspect — never collapsible as a bare homepage.
+            return None
+        path = parts.path or "/"
         # A bare homepage (no path, no fragment) may re-appear under many
         # URL shapes — collapse those by website. But a directory PROFILE url
         # (e.g. .../exhibitor#exhibitor=<rid>) has an empty path yet a unique
         # fragment; matching those by website would merge every distinct
         # exhibitor into one row. Never collapse when a fragment is present.
-        if path in ("", "/") and not urlparse(url).fragment:
+        if path in ("", "/") and not parts.fragment:
             existing = db.query(Company).filter(
                 Company.user_id == user_id, Company.website == host).first()
     return existing
@@ -940,8 +970,14 @@ def _enrich_from_official_site(db, user_id: int, company: Company,
     becomes company.website, profile URL stays as provenance.
     """
     from app.validation import normalize_email, normalize_phone
-    host = urlparse(site_url).hostname or ""
-    base = f"{urlparse(site_url).scheme}://{host}"
+    try:
+        parts = urlparse(site_url)
+    except ValueError:
+        # Malformed official-site URL from third-party adapter JSON:
+        # nothing fetchable — honest skip, never a dead job.
+        return 0, 0
+    host = parts.hostname or ""
+    base = f"{parts.scheme}://{host}"
     if not _robots_allowed(base, site_url):
         return 0, 0
     pages_used = 0

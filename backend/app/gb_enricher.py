@@ -253,8 +253,13 @@ def extract_page(html: str, url: str) -> dict:
         href = a["href"].split("#", 1)[0]
         if not href or href.startswith(("mailto:", "tel:", "javascript:")):
             continue
-        absu = urljoin(url, href)
-        p = urlparse(absu)
+        try:
+            absu = urljoin(url, href)
+            p = urlparse(absu)
+        except ValueError:
+            # Junk href in third-party HTML ("http://[bad") — skip it;
+            # one malformed link must never fail the enrichment.
+            continue
         if p.netloc and p.netloc != base_netloc:
             continue
         if NEVER_RE.search(p.path):

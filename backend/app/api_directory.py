@@ -69,7 +69,12 @@ def _host_any(u: str | None) -> str:
     """Host of a URL (or bare host) with a leading www. stripped."""
     if not u:
         return ""
-    h = urlparse(u if "://" in u else "//" + u).netloc or ""
+    try:
+        h = urlparse(u if "://" in u else "//" + u).netloc or ""
+    except ValueError:
+        # Malformed stored URL ("http://foo[bar.com") — no host, never a
+        # 500 on the public search.
+        return ""
     h = h.lower()
     return h[4:] if h.startswith("www.") else h
 
