@@ -1223,8 +1223,35 @@ def _process_url(db, client, job, canon: str, depth: int,
             db_commit_retry(db)
             time.sleep(PAGE_DELAY)
             return
-        comp = _save_company(db, job.user_id, job.source_id,
-                             canon, data, depth, lock=lock)
+        # One save = one recoverable unit. A lock error here (write-lock
+        # contention or a stale WAL snapshot from a commit in between)
+        # used to propagate out and silently drop this take — observed
+        # as a "Worker error ... database is locked" WARNING every ~40s.
+        # Roll back (expunges pending state) and re-stage the save;
+        # non-lock errors still raise immediately (real bugs stay loud).
+        comp = None
+        for _attempt in range(3):
+            try:
+                comp = _save_company(db, job.user_id, job.source_id,
+                                     canon, data, depth, lock=lock)
+                break
+            except Exception as e:
+                if not _is_lock_error(e):
+                    raise
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                if _attempt == 2:
+                    with lock:
+                        shared.setdefault("errors", []).append(
+                            f"skipped {canon}: lock contention on save "
+                            f"after 3 attempts (resume later)")
+                    logger.warning(
+                        f"Save skipped {canon} after lock retries")
+                    comp = None
+                    break
+                time.sleep(0.5 * (_attempt + 1))
         if comp:
             with lock:
                 shared["companies"] += 1

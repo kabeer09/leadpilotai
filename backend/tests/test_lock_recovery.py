@@ -320,3 +320,63 @@ def test_ingest_skips_record_when_lock_outlasts_retries(monkeypatch):
         except Exception:
             db.rollback()
         db.close()
+
+
+def test_process_url_save_retries_lock_error(monkeypatch):
+    """Worker-path pattern: a lock error at _save_company's flush rolls
+    back and re-saves instead of dropping the take (the recurring
+    'Worker error ... database is locked' WARNING every ~40s)."""
+    import app.crawler as craw
+    uid, sid = _owner()
+    html = ("<html><head><title>Retry Co</title></head><body>"
+            "Mail hello@retry.example.</body></html>")
+
+    monkeypatch.setattr(craw, "_fetch", lambda client, url: (html, None))
+    monkeypatch.setattr(craw, "_robots_allowed", lambda base, url: True)
+    monkeypatch.setattr(craw, "_render_with_browser",
+                        lambda url: (None, "off"))
+
+    calls = {"n": 0}
+    real_save = craw._save_company
+
+    def flaky_save(db_, uid_, sid_, url, data, depth, lock=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise Exception("(sqlite3.OperationalError) database is locked")
+        return real_save(db_, uid_, sid_, url, data, depth, lock=lock)
+
+    monkeypatch.setattr(craw, "_save_company", flaky_save)
+
+    db = SessionLocal()
+    try:
+        job = CrawlJob(user_id=uid, source_id=sid,
+                       url="https://retrysave.example/", max_pages=5,
+                       max_depth=1, status="CRAWLING")
+        db.add(job)
+        db.commit()
+        jid = job.id
+        shared = {"lock": threading.Lock(), "queue": None, "seen": set(),
+                  "pages": 0, "companies": 0, "contacts": 0,
+                  "render_budget": [5], "errors": [],
+                  "cancel": threading.Event(), "force_recrawl": False,
+                  "directory_mode": False, "skipped_complete": 0}
+        craw._process_url(db, None, job, "https://retrysave.example/",
+                          0, "https://retrysave.example",
+                          "retrysave.example", shared)
+        assert calls["n"] == 2, "first save hit the lock, second succeeded"
+        assert shared["companies"] == 1, "company counted exactly once"
+        rows = db.query(Company).filter(
+            Company.profile_url == "https://retrysave.example/").all()
+        assert len(rows) == 1, "one row despite the retried save"
+        db.query(Company).filter(
+            Company.profile_url == "https://retrysave.example/").delete(
+                synchronize_session=False)
+        db.query(CrawlEvent).filter(CrawlEvent.job_id == jid).delete()
+        db.query(CrawlJob).filter(CrawlJob.id == jid).delete()
+        db.commit()
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
